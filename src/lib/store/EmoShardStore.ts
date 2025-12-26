@@ -1,6 +1,7 @@
 import type { EmoShard } from '@/types/emotion';
 import { createStore, del, get, keys, set } from 'idb-keyval';
 import type { ShardAnalysisResult } from '@/lib/api/evaAnalysisClient';
+import { ensureEvaDb } from '@/lib/store/evaDb';
 
 const DB_NAME = 'eva-db';
 const STORE_NAME = 'emo-shards';
@@ -9,14 +10,17 @@ const store = createStore(DB_NAME, STORE_NAME);
 
 export const EmoShardStore = {
   async save(shard: EmoShard): Promise<void> {
+    await ensureEvaDb();
     await set(shard.id, shard, store);
   },
 
   async get(id: string): Promise<EmoShard | undefined> {
+    await ensureEvaDb();
     return get<EmoShard>(id, store);
   },
 
   async getAll(): Promise<EmoShard[]> {
+    await ensureEvaDb();
     const allKeys = await keys(store);
     const all = await Promise.all(
       allKeys.map((k) => get<EmoShard>(k as IDBValidKey, store))
@@ -25,6 +29,7 @@ export const EmoShardStore = {
   },
 
   async update(id: string, updates: Partial<EmoShard>): Promise<void> {
+    await ensureEvaDb();
     const existing = await this.get(id);
     if (!existing) throw new Error(`EmoShard ${id} no encontrado`);
     const merged: EmoShard = { ...existing, ...updates };
@@ -35,6 +40,7 @@ export const EmoShardStore = {
     id: string,
     analysis: ShardAnalysisResult
   ): Promise<EmoShard | null> {
+    await ensureEvaDb();
     const existing = await this.get(id);
     if (!existing) return null;
 
@@ -66,10 +72,12 @@ export const EmoShardStore = {
   },
 
   async delete(id: string): Promise<void> {
+    await ensureEvaDb();
     await del(id, store);
   },
 
   async clear(): Promise<void> {
+    await ensureEvaDb();
     const allKeys = await keys(store);
     await Promise.all(allKeys.map((k) => del(k as IDBValidKey, store)));
   },

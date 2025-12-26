@@ -1,6 +1,7 @@
 import type { EmoShard } from '@/types/emotion';
 import { analyzeShardAudioSafe } from '@/lib/api/evaAnalysisClient';
 import { EmoShardStore } from '@/lib/store/EmoShardStore';
+import { EpisodeStore } from '@/lib/store/EpisodeStore';
 import { ShardAnalysisStateStore } from '@/lib/state/shardAnalysisState';
 
 function errorMessageFromCode(code: string): string {
@@ -41,6 +42,10 @@ export async function runShardAnalysis(
   if (!updated) {
     ShardAnalysisStateStore.setError(shard.id, 'unknown', 'No se pudo actualizar el shard.');
     return { updated: null, ok: false };
+  }
+
+  if (updated.episodeId) {
+    await EpisodeStore.refreshEpisodeComputedFields(updated.episodeId);
   }
 
   // Clear transient UI record; analyzed state is derived from shard fields.

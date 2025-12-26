@@ -1,36 +1,171 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
-## Getting Started
+# EVA – Frontend 🎧💬
 
-First, run the development server:
+Interfaz web de EVA (Human Grounded Intelligence) para:
+
+- Grabar audio desde el micrófono.
+- Segmentar en *shards* (momentos cortos).
+- Enviar cada shard al backend `eva-analysis-service`.
+- Visualizar:
+  - Transcripción.
+  - Emoción primaria y etiquetas.
+  - Rasgos de la señal (RMS, pico, frecuencia, ZCR).
+  - Análisis semántico (resumen, topics, tipo de momento, flags).
+- Navegar una librería de clips y ver el detalle de cada uno.
+
+---
+
+## Requisitos
+
+- Node.js 20+ (o LTS reciente).
+- npm o pnpm (el proyecto está preparado para npm por defecto).
+- Backend `eva-analysis-service` corriendo en `http://localhost:5005` (o la URL que configures).
+
+---
+
+## Instalación
+
+Clona el repo:
 
 ```bash
+git clone https://github.com/hildealeman/eva.git
+cd eva
+
+Instala dependencias:
+
+npm install
+
+
+⸻
+
+Configuración (.env.local)
+
+Hay un archivo de ejemplo:
+
+cp .env.local.example .env.local
+
+Contenido típico de .env.local:
+
+NEXT_PUBLIC_EVA_DATA_MODE=local
+NEXT_PUBLIC_EVA_ANALYSIS_MODE=local
+NEXT_PUBLIC_EVA_LOCAL_ANALYSIS_BASE=http://localhost:5005
+NEXT_PUBLIC_SHOW_WAVEFORM_MVP=0
+
+	•	NEXT_PUBLIC_EVA_DATA_MODE:
+	•	local → episodios leídos desde IndexedDB (EpisodeStore).
+	•	api → lectura/escritura desde el backend:
+	•	GET /episodes
+	•	GET /episodes/{id}
+	•	PATCH /episodes/{id}
+	•	PATCH /shards/{id}
+	•	NEXT_PUBLIC_EVA_ANALYSIS_MODE:
+	•	local → usa `NEXT_PUBLIC_EVA_LOCAL_ANALYSIS_BASE`.
+	•	cloud → usa `NEXT_PUBLIC_EVA_CLOUD_ANALYSIS_BASE`.
+	•	none → desactiva análisis.
+	•	NEXT_PUBLIC_EVA_LOCAL_ANALYSIS_BASE → base URL del backend FastAPI (ej. http://localhost:5005).
+	•	NEXT_PUBLIC_SHOW_WAVEFORM_MVP:
+	•	0 → oculta el placeholder de waveform.
+	•	1 → muestra el bloque MVP para el waveform.
+
+Las variables NEXT_PUBLIC_... se exponen al navegador, así que solo se usan para configuración de UI / endpoint público del backend local.
+
+⸻
+
+Correr en desarrollo
+
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Abrir en el navegador:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+http://localhost:3000
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
-## Learn More
+⸻
 
-To learn more about Next.js, take a look at the following resources:
+Páginas principales
+	•	/
+	•	Pantalla principal de grabación.
+	•	Botón para iniciar/detener grabación.
+	•	Segmentación de audio en shards.
+	•	Crea y mantiene un episodio actual (episodeId) mientras escuchas.
+	•	Envía shards a POST /analyze-shard en el backend (meta incluye episodeId).
+	•	/clips
+	•	Lista de episodios (histórico) usando almacenamiento local (IndexedDB) vía EpisodeStore.
+	•	/clips/[id]
+	•	Detalle de un episodio:
+	•	Header con stats (duración total, shards, crisis/followups).
+	•	Lista de shards seleccionable.
+	•	Transcripción.
+	•	Lectura emocional.
+	•	Análisis semántico (“Análisis semántico”).
+	•	Rasgos de la señal.
+	•	Etiquetas sugeridas dinámicas (topics, emoción primaria, activación, prosodia).
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+⸻
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Estructura destacada
+	•	src/app/page.tsx
+	•	Home: lógica de grabación, envío a backend, panel principal.
+	•	src/app/clips/page.tsx
+	•	Listado de episodios.
+	•	src/app/clips/[id]/page.tsx
+	•	Vista detallada de un episodio con lista de shards.
+	•	src/components/audio/
+	•	LiveLevelMeter.tsx: visualización básica de niveles de entrada.
+	•	src/components/emotion/
+	•	ShardDetailPanel.tsx: panel principal de detalle emocional/semántico.
+	•	ShardListItem.tsx: item de lista para cada shard.
+	•	TagEditor.tsx, EmotionStatusPill.tsx, etc.
+	•	src/lib/api/evaAnalysisClient.ts
+	•	Cliente para llamar a eva-analysis-service.
+	•	Maneja timeouts con AbortController (por defecto 60s).
+	•	src/lib/audio/
+	•	AudioInputManager, AudioBufferRing, createWavBlob, etc.
+	•	src/lib/store/EmoShardStore.ts
+	•	Capa de persistencia (IndexedDB) para shards.
+	•	src/lib/store/EpisodeStore.ts
+	•	Capa de persistencia (IndexedDB) para episodios (EpisodeSummary) y reconstrucción de EpisodeDetail.
+	•	src/types/emotion.ts
+	•	Tipos compartidos para emociones, features, semantic, etc (incluye EpisodeSummary/EpisodeDetail).
 
-## Deploy on Vercel
+⸻
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Flujo de extremo a extremo
+	1.	El usuario abre http://localhost:3000/.
+	2.	Inicia una grabación desde el micrófono.
+	3.	Se crea un episodio actual (episodeId) al iniciar.
+	4.	El audio se segmenta en shards (trozos de ~10–15 segundos).
+	5.	Por cada shard:
+	•	Se calculan features locales (RMS, ZCR, etc.).
+	•	Se construye un FormData y se llama a POST /analyze-shard en el backend.
+	•	meta incluye shardId, episodeId, source, startTime, endTime.
+	6.	El backend devuelve un ShardAnalysisResult con:
+	•	transcript, emotion, signalFeatures, semantic, etc.
+	7.	El frontend:
+	•	Actualiza el shard en memoria y en IndexedDB.
+	•	Refresca campos agregados del episodio (tags, momentTypes, emotion dominante, etc.).
+	•	Muestra los resultados en el panel de detalle (ShardDetailPanel).
+	8.	En /clips y /clips/[id] se puede revisar el histórico.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+⸻
+
+Desarrollo
+
+Lint:
+
+npm run lint
+
+Build:
+
+npm run build
+
+
+⸻
+
+Notas
+	•	La app está pensada como un MVP de laboratorio para explorar EVA (Human Grounded Intelligence).
+	•	Se puede extender con:
+	•	Waveform real.
+	•	Controles de reproducción.
+	•	Filtros por emoción, momentType, topics.
+	•	Exportar sesiones / episodios.

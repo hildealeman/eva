@@ -11,9 +11,14 @@ import { runShardAnalysis } from '@/lib/analysis/runShardAnalysis';
 interface ShardListItemProps {
   shard: EmoShard;
   onRetry?: () => void;
+  showLink?: boolean;
 }
 
-export default function ShardListItem({ shard, onRetry }: ShardListItemProps) {
+export default function ShardListItem({
+  shard,
+  onRetry,
+  showLink = true,
+}: ShardListItemProps) {
   const { state } = useShardAnalysisState(shard);
 
   return (
@@ -48,12 +53,14 @@ export default function ShardListItem({ shard, onRetry }: ShardListItemProps) {
         </div>
       </div>
 
-      <Link
-        href={`/clips/${shard.id}`}
-        className="shrink-0 text-xs font-semibold text-emerald-400 hover:text-emerald-300"
-      >
-        Ver detalle
-      </Link>
+      {showLink ? (
+        <Link
+          href={`/clips/${shard.episodeId ?? shard.id}`}
+          className="shrink-0 text-xs font-semibold text-emerald-400 hover:text-emerald-300"
+        >
+          Ver episodio
+        </Link>
+      ) : null}
     </li>
   );
 }

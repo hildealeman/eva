@@ -39,6 +39,39 @@ export interface SemanticAnalysis {
   flags?: SemanticFlags;
 }
 
+// Episodio de diario de voz agrupando shards de análisis.
+export interface EpisodeSummary {
+  id: string;
+  title: string | null;
+  note?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  shardCount: number;
+  durationSeconds: number;
+  dominantEmotion?: CoreEmotion | null;
+  momentTypes?: string[];
+  tags?: string[];
+}
+
+export interface EpisodeStats {
+  totalDurationSeconds: number;
+  shardCount: number;
+  emotionsHistogram: Record<string, number>;
+  crisisCount: number;
+  followupCount: number;
+}
+
+export interface EpisodeDetail {
+  id: string;
+  title: string | null;
+  note?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  shards: EmoShard[];
+  summary?: string | null;
+  stats?: EpisodeStats;
+}
+
 export interface EmoFeatures {
   rms: number; // energía promedio
   peak: number; // pico máximo
@@ -52,6 +85,9 @@ export interface EmoFeatures {
 export interface EmoShard {
   id: string;
   createdAt: string;
+  // episodeId: relación clara del shard con un episodio.
+  // Nota: opcional por compatibilidad con shards antiguos ya guardados.
+  episodeId?: string;
   source: 'mic' | 'file';
   startTime: number; // inicio del clip (segundos)
   endTime: number; // fin del clip (segundos)

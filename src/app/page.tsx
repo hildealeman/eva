@@ -15,11 +15,13 @@ import {
 } from '@/lib/emotion/EmotionDetector';
 import { EmoShardBuilder } from '@/lib/emotion/EmoShardBuilder';
 import { EmoShardStore } from '@/lib/store/EmoShardStore';
+import { EpisodeStore } from '@/lib/store/EpisodeStore';
 import { runShardAnalysis } from '@/lib/analysis/runShardAnalysis';
 import LiveLevelMeter from '@/components/audio/LiveLevelMeter';
 import type { EmoShard } from '@/types/emotion';
 import AnalysisStatusBadge from '@/components/emotion/AnalysisStatusBadge';
 import { useShardAnalysisState } from '@/lib/state/useShardAnalysisState';
+import { ensureEvaDb } from '@/lib/store/evaDb';
 
 const SAMPLE_RATE = 44100;
 const BUFFER_SECONDS = 30;
@@ -42,6 +44,8 @@ export default function Home() {
   const [recentClips, setRecentClips] = useState<EmoShard[]>([]);
   const [debugInfo, setDebugInfo] = useState<EmotionDebugInfo | null>(null);
   const [eventCount, setEventCount] = useState(0);
+  const [currentEpisodeId, setCurrentEpisodeId] = useState<string | null>(null);
+  const [currentEpisodeCreatedAt, setCurrentEpisodeCreatedAt] = useState<string | null>(null);
 
   const audioManagerRef = useRef<AudioInputManager | null>(null);
   const bufferRef = useRef<AudioBufferRing | null>(null);
@@ -55,6 +59,22 @@ export default function Home() {
     const buffer = bufferRef.current;
     const extractor = extractorRef.current;
     if (!buffer || !extractor) return;
+
+    const episodeId = currentEpisodeId ?? crypto.randomUUID();
+    if (!currentEpisodeId) {
+      const nowIso = new Date().toISOString();
+      setCurrentEpisodeId(episodeId);
+      setCurrentEpisodeCreatedAt(nowIso);
+      await ensureEvaDb();
+      await EpisodeStore.upsertEpisodeSummary({
+        id: episodeId,
+        title: null,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        shardCount: 0,
+        durationSeconds: 0,
+      });
+    }
 
     let startTime = Math.max(0, episode.firstEventTime - EPISODE_PRE_PADDING_SECONDS);
     const endTime = episode.lastEventTime + EPISODE_POST_PADDING_SECONDS;
@@ -71,11 +91,14 @@ export default function Home() {
 
     const audioBlob = createWavBlobFromFloat32(windowSamples, SAMPLE_RATE);
 
-    const shard = EmoShardBuilder.build('mic', startTime, endTime, features, {
+    const shard: EmoShard = {
+      ...EmoShardBuilder.build('mic', startTime, endTime, features, {
       intensityOverride: episode.peakIntensity,
       audioBlob,
       audioSampleRate: SAMPLE_RATE,
-    });
+      }),
+      episodeId,
+    };
 
     async function runAnalysisForShard(saved: EmoShard) {
       const { updated } = await runShardAnalysis(saved);
@@ -86,6 +109,7 @@ export default function Home() {
 
     try {
       await EmoShardStore.save(shard);
+      await EpisodeStore.recordShard(episodeId, shard);
       setEventCount((prev) => prev + 1);
       setRecentClips((prev) => [shard, ...prev].slice(0, MAX_RECENT));
 
@@ -93,7 +117,7 @@ export default function Home() {
     } catch (e) {
       console.error('Error guardando clip:', e);
     }
-  }, []);
+  }, [currentEpisodeId]);
 
   const handleEmotionEvent = useCallback(
     (event: EmotionEvent) => {
@@ -142,6 +166,17 @@ export default function Home() {
   );
 
   const createTestClip = useCallback(async () => {
+    const episodeId = crypto.randomUUID();
+    const nowIso = new Date().toISOString();
+    await EpisodeStore.upsertEpisodeSummary({
+      id: episodeId,
+      title: null,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      shardCount: 0,
+      durationSeconds: 0,
+    });
+
     const now = 0;
     const durationSeconds = (DEFAULT_PRE_CONTEXT_MS + DEFAULT_POST_CONTEXT_MS) / 1000;
     const dummyFeatures = {
@@ -157,11 +192,15 @@ export default function Home() {
     const silent = new Float32Array(Math.floor(SAMPLE_RATE * durationSeconds));
     const audioBlob = createWavBlobFromFloat32(silent, SAMPLE_RATE);
 
-    const shard = EmoShardBuilder.build('mic', now, now + durationSeconds, dummyFeatures, {
-      audioBlob,
-      audioSampleRate: SAMPLE_RATE,
-    });
+    const shard: EmoShard = {
+      ...EmoShardBuilder.build('mic', now, now + durationSeconds, dummyFeatures, {
+        audioBlob,
+        audioSampleRate: SAMPLE_RATE,
+      }),
+      episodeId,
+    };
     await EmoShardStore.save(shard);
+    await EpisodeStore.recordShard(episodeId, shard);
 
     setRecentClips((prev) => [shard, ...prev].slice(0, MAX_RECENT));
     setEventCount((prev) => prev + 1);
@@ -235,12 +274,62 @@ export default function Home() {
         setIsListening(false);
         setRms(0);
       } else {
+        const episodeId = crypto.randomUUID();
+        const nowIso = new Date().toISOString();
+        setCurrentEpisodeId(episodeId);
+        setCurrentEpisodeCreatedAt(nowIso);
+        await ensureEvaDb();
+        await EpisodeStore.upsertEpisodeSummary({
+          id: episodeId,
+          title: null,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+          shardCount: 0,
+          durationSeconds: 0,
+        });
+
         await manager.start((samples, timeSeconds) => handleChunk(samples, timeSeconds));
         setIsListening(true);
       }
     } catch (error) {
-      console.error('Error de audio:', error);
-      alert('No se pudo acceder al micrófono. Revisa permisos del navegador.');
+      console.error('Error al iniciar escucha:', error);
+
+      const err = error as unknown as { name?: string; message?: string; stack?: string };
+      const message = err?.message ?? '';
+      const stack = err?.stack ?? '';
+
+      const isIndexedDbIssue =
+        message.includes('IDBDatabase') ||
+        message.includes('object stores was not found') ||
+        message.includes('object store') ||
+        stack.includes('EpisodeStore') ||
+        stack.includes('EmoShardStore') ||
+        stack.includes('idb-keyval');
+
+      const isMicIssue =
+        err?.name === 'NotAllowedError' ||
+        err?.name === 'NotFoundError' ||
+        message.includes('getUserMedia') ||
+        message.toLowerCase().includes('microphone');
+
+      if (isIndexedDbIssue) {
+        alert(
+          'Hubo un problema con el almacenamiento local (IndexedDB). ' +
+            'Prueba recargar la página. Si persiste, borra los datos del sitio ' +
+            'en Configuración → Cookies y otros datos del sitio.'
+        );
+        return;
+      }
+
+      if (isMicIssue) {
+        alert('No se pudo acceder al micrófono. Revisa permisos del navegador.');
+        return;
+      }
+
+      alert(
+        'No se pudo iniciar la escucha por un error inesperado. ' +
+          'Revisa la consola para más detalles.'
+      );
     }
   }, [finalizeEpisode, handleChunk]);
 
@@ -255,6 +344,11 @@ export default function Home() {
             Este MVP muestra el nivel de audio del micrófono en tiempo real.
             Cuando esto funcione bien, conectaremos análisis emocional y clips.
           </p>
+          {currentEpisodeCreatedAt && (
+            <p className="text-xs text-slate-400">
+              Episodio actual: {new Date(currentEpisodeCreatedAt).toLocaleString('es-MX')}
+            </p>
+          )}
         </header>
 
         <div className="flex flex-col items-center gap-4">
@@ -407,10 +501,10 @@ function RecentClipRow({
       </div>
 
       <Link
-        href={`/clips/${clip.id}`}
+        href={`/clips/${clip.episodeId ?? clip.id}`}
         className="text-xs font-semibold text-emerald-400 hover:text-emerald-300"
       >
-        Ver detalle
+        Ver episodio
       </Link>
     </li>
   );

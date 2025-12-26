@@ -90,6 +90,7 @@ export async function analyzeShardAudioSafe(
     'meta',
     JSON.stringify({
       shardId: shard.id,
+      episodeId: shard.episodeId ?? null,
       source: shard.source,
       startTime: shard.startTime,
       endTime: shard.endTime,

@@ -4,72 +4,150 @@ import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { EmoShardStore } from '@/lib/store/EmoShardStore';
-import type { EmoShard, EmoShardStatus } from '@/types/emotion';
+import type { EmoShard, EmoShardStatus, EpisodeDetail } from '@/types/emotion';
 import ShardDetailPanel from '@/components/emotion/ShardDetailPanel';
 import { useShardAnalysisState } from '@/lib/state/useShardAnalysisState';
 import AnalysisStatusBadge from '@/components/emotion/AnalysisStatusBadge';
 import { runShardAnalysis } from '@/lib/analysis/runShardAnalysis';
+import ShardListItem from '@/components/emotion/ShardListItem';
+import { getEpisodeClient } from '@/lib/api/EpisodeClient';
+import { getEvaDataMode } from '@/lib/config/evaAnalysisConfig';
 
 export default function ClipDetailPage() {
   const params = useParams<{ id: string }>();
-  const id = params?.id;
+  const episodeId = params?.id;
 
   const showWaveformMvp =
     process.env.NEXT_PUBLIC_SHOW_WAVEFORM_MVP === '1';
 
-  const [shard, setShard] = useState<EmoShard | null>(null);
+  const [episode, setEpisode] = useState<EpisodeDetail | null>(null);
+  const [selectedShardId, setSelectedShardId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [episodeTitle, setEpisodeTitle] = useState<string>('');
+  const [episodeNote, setEpisodeNote] = useState<string>('');
 
-  const { state: analysisState, errorMessage } = useShardAnalysisState(shard);
+  const selectedShard =
+    episode?.shards.find((s) => s.id === selectedShardId) ??
+    (episode?.shards[0] ?? null);
+
+  const { state: analysisState, errorMessage } = useShardAnalysisState(selectedShard);
   const hasSemanticAnalysis = Boolean(
-    shard?.analysisAt || shard?.transcript || shard?.primaryEmotion
+    selectedShard?.analysisAt || selectedShard?.transcript || selectedShard?.primaryEmotion
   );
 
   const handleAnalyzeNow = useCallback(async () => {
-    if (!shard) return;
-    const { updated } = await runShardAnalysis(shard);
-    if (updated) setShard(updated);
-  }, [shard]);
+    if (!selectedShard) return;
+    const { updated } = await runShardAnalysis(selectedShard);
+    if (!updated) return;
+
+    setEpisode((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        shards: prev.shards.map((s) => (s.id === updated.id ? updated : s)),
+      };
+    });
+  }, [selectedShard]);
 
   useEffect(() => {
-    if (!id) return;
-    EmoShardStore.get(id).then((data) => {
-      setShard(data ?? null);
+    if (!episodeId) return;
+    const client = getEpisodeClient();
+    client.getEpisodeDetail(episodeId).then((data) => {
+      setEpisode(data ?? null);
+      setSelectedShardId(data?.shards[0]?.id ?? null);
+      setEpisodeTitle(data?.title ?? '');
+      setEpisodeNote(data?.note ?? '');
       setLoading(false);
     });
-  }, [id]);
+  }, [episodeId]);
 
   const handleStatusChange = useCallback((status: EmoShardStatus) => {
-    setShard((prev) => (prev ? { ...prev, status } : prev));
-  }, []);
+    if (!selectedShard) return;
+    setEpisode((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        shards: prev.shards.map((s) =>
+          s.id === selectedShard.id ? { ...s, status } : s
+        ),
+      };
+    });
+  }, [selectedShard]);
 
   const handleTagAdd = useCallback((tag: string) => {
     const t = tag.trim();
     if (!t) return;
-    setShard((prev) =>
-      prev
-        ? { ...prev, userTags: Array.from(new Set([...prev.userTags, t])) }
-        : prev
-    );
-  }, []);
+    if (!selectedShard) return;
+    setEpisode((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        shards: prev.shards.map((s) =>
+          s.id === selectedShard.id
+            ? { ...s, userTags: Array.from(new Set([...(s.userTags ?? []), t])) }
+            : s
+        ),
+      };
+    });
+  }, [selectedShard]);
 
   const handleTagRemove = useCallback((tag: string) => {
-    setShard((prev) =>
-      prev ? { ...prev, userTags: prev.userTags.filter((t) => t !== tag) } : prev
-    );
-  }, []);
+    if (!selectedShard) return;
+    setEpisode((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        shards: prev.shards.map((s) =>
+          s.id === selectedShard.id
+            ? { ...s, userTags: (s.userTags ?? []).filter((t) => t !== tag) }
+            : s
+        ),
+      };
+    });
+  }, [selectedShard]);
 
   const handleChange = useCallback((updates: Partial<EmoShard>) => {
-    setShard((prev) => (prev ? { ...prev, ...updates } : prev));
-  }, []);
+    if (!selectedShard) return;
+    setEpisode((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        shards: prev.shards.map((s) =>
+          s.id === selectedShard.id ? { ...s, ...updates } : s
+        ),
+      };
+    });
+  }, [selectedShard]);
 
   const handleSave = useCallback(async () => {
-    if (!shard) return;
-    await EmoShardStore.update(shard.id, shard);
-    alert('Cambios guardados.');
-  }, [shard]);
+    if (!selectedShard) return;
 
-  if (!id) {
+    const client = getEpisodeClient();
+    if (episode && getEvaDataMode() === 'api') {
+      await client.updateEpisodeMeta(episode.id, {
+        title: episodeTitle.trim() ? episodeTitle.trim() : null,
+        note: episodeNote.trim() ? episodeNote.trim() : null,
+      });
+    }
+
+    if (getEvaDataMode() === 'api') {
+      const updated = await client.updateShard(selectedShard.id, selectedShard);
+      if (updated) {
+        setEpisode((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            shards: prev.shards.map((s) => (s.id === updated.id ? updated : s)),
+          };
+        });
+      }
+    }
+
+    await EmoShardStore.update(selectedShard.id, selectedShard);
+    alert('Cambios guardados.');
+  }, [episode, episodeNote, episodeTitle, selectedShard]);
+
+  if (!episodeId) {
     return (
       <main className="min-h-screen bg-slate-950 text-slate-50 p-6">
         ID de clip no proporcionado.
@@ -85,11 +163,11 @@ export default function ClipDetailPage() {
     );
   }
 
-  if (!shard) {
+  if (!episode || !selectedShard) {
     return (
       <main className="min-h-screen bg-slate-950 text-slate-50 p-6">
         <div className="max-w-xl mx-auto space-y-4">
-          <p className="text-sm text-red-400">Clip no encontrado.</p>
+          <p className="text-sm text-red-400">Episodio no encontrado.</p>
           <Link
             href="/clips"
             className="text-xs font-semibold text-emerald-400 hover:text-emerald-300"
@@ -101,13 +179,16 @@ export default function ClipDetailPage() {
     );
   }
 
+  const fallbackTitle = `Episodio del ${new Date(episode.createdAt).toLocaleString('es-MX')}`;
+  const title = episodeTitle.trim() ? episodeTitle.trim() : fallbackTitle;
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 p-6">
-      <div className="max-w-xl mx-auto space-y-6">
+      <div className="max-w-5xl mx-auto space-y-6">
         <header className="space-y-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-bold">Detalle del clip</h1>
+              <h1 className="text-2xl font-bold">{title}</h1>
               <AnalysisStatusBadge state={analysisState} />
             </div>
             <Link
@@ -117,7 +198,43 @@ export default function ClipDetailPage() {
               Volver
             </Link>
           </div>
-          <p className="text-xs text-slate-400">ID: {shard.id}</p>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <div className="text-xs text-slate-400">Título</div>
+              <input
+                value={episodeTitle}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setEpisodeTitle(next);
+                  setEpisode((prev) => (prev ? { ...prev, title: next || null } : prev));
+                }}
+                className="w-full h-10 rounded-lg bg-slate-900 border border-slate-800 px-3 text-sm text-slate-100"
+                placeholder={fallbackTitle}
+              />
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-xs text-slate-400">Nota (opcional)</div>
+              <input
+                value={episodeNote}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setEpisodeNote(next);
+                  setEpisode((prev) => (prev ? { ...prev, note: next || null } : prev));
+                }}
+                className="w-full h-10 rounded-lg bg-slate-900 border border-slate-800 px-3 text-sm text-slate-100"
+                placeholder="Nota del episodio"
+              />
+            </div>
+          </div>
+
+          <p className="text-xs text-slate-400">ID: {episode.id}</p>
+          {episode.stats && (
+            <div className="text-xs text-slate-400">
+              Shards: {episode.stats.shardCount} · Duración total: {episode.stats.totalDurationSeconds.toFixed(1)} s · Crisis: {episode.stats.crisisCount} · Follow-up: {episode.stats.followupCount}
+            </div>
+          )}
         </header>
 
         {showWaveformMvp && (
@@ -136,13 +253,13 @@ export default function ClipDetailPage() {
 
           {hasSemanticAnalysis ? (
             <div className="text-xs text-slate-400 space-y-1">
-              {shard.analysisAt && (
+              {selectedShard.analysisAt && (
                 <div>
-                  Analizado el: {new Date(shard.analysisAt).toLocaleString('es-MX')}
+                  Analizado el: {new Date(selectedShard.analysisAt).toLocaleString('es-MX')}
                 </div>
               )}
-              {shard.analysisVersion && (
-                <div>Versión de análisis: {shard.analysisVersion}</div>
+              {selectedShard.analysisVersion && (
+                <div>Versión de análisis: {selectedShard.analysisVersion}</div>
               )}
             </div>
           ) : analysisState === 'analyzing' ? (
@@ -174,14 +291,32 @@ export default function ClipDetailPage() {
           )}
         </div>
 
-        <div className="border border-slate-800 rounded-xl p-4">
-          <ShardDetailPanel
-            shard={shard}
-            onChange={handleChange}
-            onTagAdd={handleTagAdd}
-            onTagRemove={handleTagRemove}
-            onStatusChange={handleStatusChange}
-          />
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="md:col-span-1 border border-slate-800 rounded-xl p-4">
+            <h2 className="text-sm font-semibold mb-3">Shards</h2>
+            <ul className="space-y-3">
+              {episode.shards.map((s) => (
+                <div
+                  key={s.id}
+                  onClick={() => setSelectedShardId(s.id)}
+                  className={`w-full text-left ${
+                    s.id === selectedShard.id ? 'ring-2 ring-emerald-600/50 rounded-lg' : ''
+                  }`}
+                >
+                  <ShardListItem shard={s} showLink={false} />
+                </div>
+              ))}
+            </ul>
+          </div>
+          <div className="md:col-span-2 border border-slate-800 rounded-xl p-4">
+            <ShardDetailPanel
+              shard={selectedShard}
+              onChange={handleChange}
+              onTagAdd={handleTagAdd}
+              onTagRemove={handleTagRemove}
+              onStatusChange={handleStatusChange}
+            />
+          </div>
         </div>
 
         <button
