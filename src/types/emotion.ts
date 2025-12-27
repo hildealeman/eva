@@ -39,6 +39,24 @@ export interface SemanticAnalysis {
   flags?: SemanticFlags;
 }
 
+export interface EmotionReading {
+  primary?: string;
+  valence?: string;
+  activation?: string;
+  distribution?: Record<string, number>;
+  headline?: string | null;
+  explanation?: string | null;
+}
+
+export type ShardUserStatus = 'draft' | 'reviewed' | 'readyToPublish';
+
+export interface ShardUserReview {
+  status?: ShardUserStatus;
+  userTags?: string[];
+  userNotes?: string;
+  transcriptOverride?: string;
+}
+
 // Episodio de diario de voz agrupando shards de análisis.
 export interface EpisodeSummary {
   id: string;
@@ -114,10 +132,18 @@ export interface EmoShard {
   arousal?: ArousalLevel | null;
   prosodyFlags?: ProsodyFlags;
 
+  analysis?: {
+    emotion?: EmotionReading;
+    user?: ShardUserReview;
+  };
+
   analysisSource?: 'local' | 'cloud' | null;
   analysisMode?: 'automatic' | 'manual' | null;
   analysisVersion?: string | null;
   analysisAt?: string | null;
 
   semantic?: SemanticAnalysis | null;
+
+  publishState?: 'published' | string | null;
+  deleted?: boolean;
 }

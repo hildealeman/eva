@@ -1,5 +1,5 @@
 import type { EmoShard, EpisodeDetail, EpisodeStats, EpisodeSummary } from '@/types/emotion';
-import { createStore, get, keys, set } from 'idb-keyval';
+import { createStore, del, get, keys, set } from 'idb-keyval';
 import { EmoShardStore } from '@/lib/store/EmoShardStore';
 import { ensureEvaDb } from '@/lib/store/evaDb';
 
@@ -99,6 +99,11 @@ export const EpisodeStore = {
     await set(summary.id, summary, store);
   },
 
+  async deleteEpisodeSummary(id: string): Promise<void> {
+    await ensureEvaDb();
+    await del(id, store);
+  },
+
   async getEpisodeSummary(id: string): Promise<EpisodeSummary | null> {
     await ensureEvaDb();
     return (await get<EpisodeSummary>(id, store)) ?? null;
@@ -145,6 +150,7 @@ export const EpisodeStore = {
       rebuilt.push({
         id: episodeId,
         title: null,
+        note: null,
         createdAt,
         updatedAt,
         ...computed,
@@ -186,6 +192,7 @@ export const EpisodeStore = {
     return {
       id,
       title: summary?.title ?? null,
+      note: summary?.note ?? null,
       createdAt,
       updatedAt,
       shards,
@@ -206,6 +213,7 @@ export const EpisodeStore = {
     const next: EpisodeSummary = {
       id: episodeId,
       title: existing?.title ?? null,
+      note: existing?.note ?? null,
       createdAt,
       updatedAt: nowIso,
       shardCount: (existing?.shardCount ?? 0) + 1,
@@ -229,6 +237,7 @@ export const EpisodeStore = {
     const next: EpisodeSummary = {
       id: episodeId,
       title: existing?.title ?? null,
+      note: existing?.note ?? null,
       createdAt: existing?.createdAt ?? detail.createdAt,
       updatedAt: new Date().toISOString(),
       ...computed,

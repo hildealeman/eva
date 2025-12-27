@@ -16,6 +16,9 @@ export interface EpisodeClient {
     updates: { title?: string | null; note?: string | null }
   ): Promise<void>;
   updateShard(id: string, updates: Partial<EmoShard>): Promise<EmoShard | null>;
+  publishShard(shardId: string): Promise<EmoShard | null>;
+  deleteShard(shardId: string, reason: string): Promise<EmoShard | null>;
+  deleteEpisode(id: string): Promise<void>;
 }
 
 function getEvaApiBaseUrl(): string | null {
@@ -34,12 +37,29 @@ class LocalEpisodeClient implements EpisodeClient {
   }
 
   async updateEpisodeMeta(
-    _id: string,
-    _updates: { title?: string | null; note?: string | null }
+    id: string,
+    updates: { title?: string | null; note?: string | null }
   ): Promise<void> {
-    void _id;
-    void _updates;
-    return;
+    const existing = await EpisodeStore.getEpisodeSummary(id);
+    const detail = existing ? null : await EpisodeStore.getEpisodeById(id);
+
+    const nowIso = new Date().toISOString();
+
+    const next: EpisodeSummary = {
+      id,
+      title: updates.title !== undefined ? updates.title : existing?.title ?? null,
+      note: updates.note !== undefined ? updates.note : existing?.note ?? null,
+      createdAt: existing?.createdAt ?? detail?.createdAt ?? nowIso,
+      updatedAt: nowIso,
+      shardCount: existing?.shardCount ?? detail?.stats?.shardCount ?? detail?.shards?.length ?? 0,
+      durationSeconds:
+        existing?.durationSeconds ?? detail?.stats?.totalDurationSeconds ?? 0,
+      dominantEmotion: existing?.dominantEmotion ?? null,
+      momentTypes: existing?.momentTypes ?? [],
+      tags: existing?.tags ?? [],
+    };
+
+    await EpisodeStore.upsertEpisodeSummary(next);
   }
 
   async updateShard(id: string, updates: Partial<EmoShard>): Promise<EmoShard | null> {
@@ -47,6 +67,22 @@ class LocalEpisodeClient implements EpisodeClient {
     if (!existing) return null;
     await EmoShardStore.update(id, updates);
     return { ...existing, ...updates };
+  }
+
+  async publishShard(shardId: string): Promise<EmoShard | null> {
+    void shardId;
+    return null;
+  }
+
+  async deleteShard(shardId: string, reason: string): Promise<EmoShard | null> {
+    void shardId;
+    void reason;
+    return null;
+  }
+
+  async deleteEpisode(id: string): Promise<void> {
+    await EmoShardStore.deleteByEpisodeId(id);
+    await EpisodeStore.deleteEpisodeSummary(id);
   }
 }
 
@@ -120,16 +156,45 @@ class ApiEpisodeClient implements EpisodeClient {
 
     if (!response.ok) {
       console.error('EVA update episode endpoint error', response.status);
+      return;
+    }
+
+    // Best-effort: keep local IndexedDB in sync for offline continuity.
+    try {
+      const existing = await EpisodeStore.getEpisodeSummary(id);
+      const nowIso = new Date().toISOString();
+      const next: EpisodeSummary = {
+        id,
+        title: updates.title !== undefined ? updates.title : existing?.title ?? null,
+        note: updates.note !== undefined ? updates.note : existing?.note ?? null,
+        createdAt: existing?.createdAt ?? nowIso,
+        updatedAt: nowIso,
+        shardCount: existing?.shardCount ?? 0,
+        durationSeconds: existing?.durationSeconds ?? 0,
+        dominantEmotion: existing?.dominantEmotion ?? null,
+        momentTypes: existing?.momentTypes ?? [],
+        tags: existing?.tags ?? [],
+      };
+      await EpisodeStore.upsertEpisodeSummary(next);
+    } catch (err) {
+      console.warn('Failed to sync local episode meta after API patch', err);
     }
   }
 
   async updateShard(id: string, updates: Partial<EmoShard>): Promise<EmoShard | null> {
     const body: Record<string, unknown> = {};
 
-    if (updates.status !== undefined) body.status = updates.status;
-    if (updates.userTags !== undefined) body.userTags = updates.userTags;
-    if (updates.notes !== undefined) body.notes = updates.notes;
-    if (updates.transcript !== undefined) body.transcript = updates.transcript;
+    const user = updates.analysis?.user;
+
+    const status = user?.status ?? updates.status;
+    const userTags = user?.userTags ?? updates.userTags;
+    const userNotes = user?.userNotes ?? updates.notes;
+    const transcriptOverride = user?.transcriptOverride;
+
+    if (status !== undefined) body.status = status;
+    if (userTags !== undefined) body.userTags = userTags;
+    if (userNotes !== undefined) body.userNotes = userNotes;
+    if (transcriptOverride !== undefined) body.transcriptOverride = transcriptOverride;
 
     if (Object.keys(body).length === 0) {
       return null;
@@ -150,6 +215,59 @@ class ApiEpisodeClient implements EpisodeClient {
 
     const json = (await response.json()) as unknown;
     return coerceShard(json);
+  }
+
+  async publishShard(shardId: string): Promise<EmoShard | null> {
+    const url = `${this.baseUrl}/shards/${encodeURIComponent(shardId)}/publish`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      if (!response.ok) {
+        console.error('EVA publish shard endpoint error', response.status);
+        throw new Error(`http_${response.status}`);
+      }
+
+      const json = (await response.json()) as unknown;
+      return coerceShard(json);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('http_')) throw err;
+      console.error('EVA publish shard endpoint network error', err);
+      throw new Error('network_error');
+    }
+  }
+
+  async deleteShard(shardId: string, reason: string): Promise<EmoShard | null> {
+    const url = `${this.baseUrl}/shards/${encodeURIComponent(shardId)}/delete`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason }),
+      });
+
+      if (!response.ok) {
+        console.error('EVA delete shard endpoint error', response.status);
+        throw new Error(`http_${response.status}`);
+      }
+
+      const json = (await response.json()) as unknown;
+      return coerceShard(json);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('http_')) throw err;
+      console.error('EVA delete shard endpoint network error', err);
+      throw new Error('network_error');
+    }
+  }
+
+  async deleteEpisode(id: string): Promise<void> {
+    // Note: EVA 2 does not expose DELETE endpoints yet.
+    // In api mode we only delete local IndexedDB copies so the UI can manage local state.
+    await EmoShardStore.deleteByEpisodeId(id);
+    await EpisodeStore.deleteEpisodeSummary(id);
   }
 }
 

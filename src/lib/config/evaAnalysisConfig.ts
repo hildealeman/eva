@@ -2,22 +2,26 @@ export type EvaAnalysisMode = 'none' | 'local' | 'cloud';
 
 export type EvaDataMode = 'local' | 'api';
 
-export const evaDataMode: EvaDataMode =
-  process.env.NEXT_PUBLIC_EVA_DATA_MODE === 'api' ? 'api' : 'local';
-
 export function getEvaDataMode(): EvaDataMode {
-  return evaDataMode;
+  const raw = process.env.NEXT_PUBLIC_EVA_DATA_MODE?.toLowerCase();
+  if (raw === 'local' || raw === 'api') {
+    return raw;
+  }
+  return 'api';
 }
 
 export function getEvaAnalysisMode(): EvaAnalysisMode {
-  const raw = process.env.NEXT_PUBLIC_EVA_ANALYSIS_MODE ?? 'none';
+  const raw = process.env.NEXT_PUBLIC_EVA_ANALYSIS_MODE?.toLowerCase();
+  if (raw === 'none') return 'none';
   if (raw === 'local' || raw === 'cloud') return raw;
-  return 'none';
+  return 'local';
 }
 
 export function getLocalAnalysisBaseUrl(): string | null {
   const raw = process.env.NEXT_PUBLIC_EVA_LOCAL_ANALYSIS_BASE ?? '';
-  return raw || null;
+  const trimmed = raw.trim();
+  if (trimmed) return trimmed;
+  return 'http://localhost:5005';
 }
 
 export function getCloudAnalysisBaseUrl(): string | null {

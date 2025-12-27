@@ -28,6 +28,15 @@ export const EmoShardStore = {
     return all.filter((s): s is EmoShard => !!s);
   },
 
+  async getByEpisodeId(episodeId: string): Promise<EmoShard[]> {
+    await ensureEvaDb();
+    const all = await this.getAll();
+    return all
+      .filter((s) => (s.episodeId ?? s.id) === episodeId)
+      .map((s) => ({ ...s, episodeId }))
+      .sort((a, b) => a.startTime - b.startTime);
+  },
+
   async update(id: string, updates: Partial<EmoShard>): Promise<void> {
     await ensureEvaDb();
     const existing = await this.get(id);
@@ -59,6 +68,11 @@ export const EmoShardStore = {
         ...(existing.prosodyFlags ?? {}),
         ...(analysis.prosodyFlags ?? {}),
       },
+
+      analysis: {
+        ...(existing.analysis ?? {}),
+        emotion: analysis.emotion ?? existing.analysis?.emotion,
+      },
       analysisSource: analysis.analysisSource ?? existing.analysisSource ?? null,
       analysisMode: analysis.analysisMode ?? existing.analysisMode ?? null,
       analysisVersion: analysis.analysisVersion ?? existing.analysisVersion ?? null,
@@ -74,6 +88,18 @@ export const EmoShardStore = {
   async delete(id: string): Promise<void> {
     await ensureEvaDb();
     await del(id, store);
+  },
+
+  async deleteByEpisodeId(episodeId: string): Promise<void> {
+    await ensureEvaDb();
+    const allKeys = await keys(store);
+    const all = await Promise.all(allKeys.map((k) => get<EmoShard>(k as IDBValidKey, store)));
+    const toDelete = all
+      .filter((s): s is EmoShard => !!s)
+      .filter((s) => (s.episodeId ?? s.id) === episodeId)
+      .map((s) => s.id);
+
+    await Promise.all(toDelete.map((id) => del(id, store)));
   },
 
   async clear(): Promise<void> {

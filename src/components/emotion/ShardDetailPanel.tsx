@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useMemo } from 'react';
-import type { EmoShard, EmoShardStatus } from '@/types/emotion';
+import { useCallback, useEffect, useMemo } from 'react';
+import type { EmoShard, EmoShardStatus, EmotionReading } from '@/types/emotion';
 import TagEditor from '@/components/emotion/TagEditor';
 import StatusSelector from '@/components/emotion/StatusSelector';
 
@@ -119,6 +119,66 @@ export default function ShardDetailPanel({
   onStatusChange,
 }: ShardDetailPanelProps) {
   const suggestedTags = buildSuggestedTags(shard);
+  const emotion = useMemo(() => {
+    const fromAnalysis = shard.analysis?.emotion as
+      | {
+          primary?: string;
+          valence?: string;
+          activation?: string;
+          distribution?: Record<string, number>;
+          headline?: string | null;
+          explanation?: string | null;
+        }
+      | undefined;
+
+    if (fromAnalysis?.primary) {
+      return fromAnalysis;
+    }
+
+    const legacyPrimary = shard.primaryEmotion;
+    const legacyValence = shard.valence;
+    const legacyActivation = shard.arousal;
+    const legacyDistribution: Record<string, number> | undefined = shard.emotionLabels?.length
+      ? Object.fromEntries(shard.emotionLabels.map((e) => [e.label, e.score]))
+      : undefined;
+
+    const hasAnyLegacy =
+      !!legacyPrimary || !!legacyValence || !!legacyActivation || !!legacyDistribution;
+    if (!hasAnyLegacy) return undefined;
+
+    const built: EmotionReading = {
+      primary: legacyPrimary ?? undefined,
+      valence: legacyValence ?? undefined,
+      activation: legacyActivation ?? undefined,
+      distribution: legacyDistribution,
+      headline: null,
+      explanation: null,
+    };
+
+    return built;
+  }, [
+    shard.analysis?.emotion,
+    shard.primaryEmotion,
+    shard.valence,
+    shard.arousal,
+    shard.emotionLabels,
+  ]);
+
+  const distributionEntries = useMemo(() => {
+    const dist = emotion?.distribution;
+    if (!dist) return [] as Array<[string, number]>;
+    return Object.entries(dist)
+      .filter(([, v]) => typeof v === 'number' && Number.isFinite(v))
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5);
+  }, [emotion?.distribution]);
+
+  const formatPercent = useCallback((value: number): string => {
+    const rounded = Math.round(value * 1000) / 10;
+    const asString = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+    return `${asString}%`;
+  }, []);
+
   const audioUrl = useMemo(() => {
     if (!shard.audioBlob) return null;
     return URL.createObjectURL(shard.audioBlob);
@@ -178,40 +238,37 @@ export default function ShardDetailPanel({
         </section>
       )}
 
-      {(shard.primaryEmotion || (shard.emotionLabels && shard.emotionLabels.length > 0)) && (
-        <section className="space-y-2 text-sm">
-          <h2 className="font-semibold text-sm">Lectura emocional</h2>
+      <section className="space-y-2 text-sm">
+        <h2 className="font-semibold text-sm">Lectura emocional</h2>
 
-          {shard.primaryEmotion && (
-            <p className="text-sm text-slate-200">
-              Emoción principal: <span className="font-semibold">{shard.primaryEmotion}</span>
-              {shard.valence ? ` · Valencia: ${shard.valence}` : ''}
-              {shard.arousal ? ` · Activación: ${shard.arousal}` : ''}
+        {!emotion?.primary ? (
+          <p className="text-xs text-slate-400">
+            Aún no hay una lectura emocional disponible para este momento.
+          </p>
+        ) : (
+          <>
+            <p className="text-xs text-slate-300">
+              Emoción principal: <span className="font-semibold">{emotion.primary}</span>
+              {emotion.valence ? ` · Valencia: ${emotion.valence}` : ''}
+              {emotion.activation ? ` · Activación: ${emotion.activation}` : ''}
             </p>
-          )}
 
-          {shard.emotionLabels && shard.emotionLabels.length > 0 && (
-            <ul className="text-xs text-slate-300 space-y-1">
-              {shard.emotionLabels.slice(0, 5).map((e, index) => (
-                <li key={`${e.label}-${index}`}>
-                  {e.label}: {(e.score * 100).toFixed(1)}%
-                </li>
-              ))}
-            </ul>
-          )}
+            {distributionEntries.length > 0 ? (
+              <ul className="text-xs text-slate-300 space-y-1">
+                {distributionEntries.map(([label, value], index) => (
+                  <li key={`${label}-${index}`}>
+                    {label}: {formatPercent(value * 100)}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
 
-          {shard.prosodyFlags && (
-            <p className="text-xs text-slate-400">
-              {shard.prosodyFlags.laughter && shard.prosodyFlags.laughter !== 'none'
-                ? 'Risa detectada. '
-                : ''}
-              {shard.prosodyFlags.crying === 'present' ? 'Posible llanto. ' : ''}
-              {shard.prosodyFlags.shouting === 'present' ? 'Alza de voz. ' : ''}
-              {shard.prosodyFlags.sighing === 'present' ? 'Suspiros presentes. ' : ''}
-            </p>
-          )}
-        </section>
-      )}
+            {emotion.headline ? (
+              <p className="text-xs text-slate-400">{emotion.headline}</p>
+            ) : null}
+          </>
+        )}
+      </section>
 
       {(shard.semantic?.summary ||
         (shard.semantic?.topics && shard.semantic.topics.length > 0) ||

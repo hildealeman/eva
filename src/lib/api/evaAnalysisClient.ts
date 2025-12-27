@@ -2,6 +2,7 @@ import type {
   ArousalLevel,
   CoreEmotion,
   EmoShard,
+  EmotionReading,
   EmotionLabelScore,
   ProsodyFlags,
   SemanticAnalysis,
@@ -23,6 +24,8 @@ export interface ShardAnalysisResult {
   valence?: Valence | null;
   arousal?: ArousalLevel | null;
   prosodyFlags?: ProsodyFlags;
+
+  emotion?: EmotionReading;
 
   analysisSource: 'local' | 'cloud';
   analysisMode: 'automatic';

@@ -22,6 +22,10 @@ import type { EmoShard } from '@/types/emotion';
 import AnalysisStatusBadge from '@/components/emotion/AnalysisStatusBadge';
 import { useShardAnalysisState } from '@/lib/state/useShardAnalysisState';
 import { ensureEvaDb } from '@/lib/store/evaDb';
+import EVAStatusCard from '@/components/status/EVAStatusCard';
+import MyRoleCard from '@/components/community/MyRoleCard';
+import ProgressCard from '@/components/community/ProgressCard';
+import InvitationsPanel from '@/components/profile/InvitationsPanel';
 
 const SAMPLE_RATE = 44100;
 const BUFFER_SECONDS = 30;
@@ -340,6 +344,12 @@ export default function Home() {
           <h1 className="text-2xl font-bold tracking-tight">
             EVA · Escucha Emocional (MVP)
           </h1>
+          <Link
+            href="/episodes"
+            className="inline-flex items-center text-xs rounded-full border border-slate-700 px-3 py-1.5 text-slate-200 hover:bg-slate-900 w-fit"
+          >
+            Ver todos los episodios
+          </Link>
           <p className="text-sm text-slate-400">
             Este MVP muestra el nivel de audio del micrófono en tiempo real.
             Cuando esto funcione bien, conectaremos análisis emocional y clips.
@@ -350,6 +360,15 @@ export default function Home() {
             </p>
           )}
         </header>
+
+        <EVAStatusCard />
+
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 w-full">
+          <MyRoleCard />
+          <ProgressCard />
+        </div>
+
+        <InvitationsPanel />
 
         <div className="flex flex-col items-center gap-4">
           <LiveLevelMeter rms={rms} isActive={isListening} />
@@ -439,7 +458,7 @@ export default function Home() {
               <ul className="space-y-2">
                 {recentClips.map((clip) => (
                   <RecentClipRow
-                    key={clip.id}
+                    key={`${clip.id}-${clip.createdAt}`}
                     clip={clip}
                     onRetry={() => {
                       void (async () => {
