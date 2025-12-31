@@ -9,6 +9,7 @@ import type {
   EmoShard,
   EmoShardStatus,
   EpisodeDetail,
+  EpisodeSummary,
   EmotionReading,
   ShardUserStatus,
 } from '@/types/emotion';
@@ -18,6 +19,7 @@ import AnalysisStatusBadge from '@/components/emotion/AnalysisStatusBadge';
 import { runShardAnalysis } from '@/lib/analysis/runShardAnalysis';
 import { getEpisodeClient } from '@/lib/api/EpisodeClient';
 import { getEvaDataMode } from '@/lib/config/evaAnalysisConfig';
+import EpisodeInsightsPanel from '@/components/episodes/EpisodeInsightsPanel';
 
 function getShardEmotionReading(shard: EmoShard): EmotionReading | undefined {
   const fromAnalysis = shard.analysis?.emotion as
@@ -79,10 +81,17 @@ export default function ClipDetailPage() {
     process.env.NEXT_PUBLIC_SHOW_WAVEFORM_MVP === '1';
 
   const [episode, setEpisode] = useState<EpisodeDetail | null>(null);
+  const [localEpisode, setLocalEpisode] = useState<EpisodeDetail | null>(null);
+  const [remoteEpisode, setRemoteEpisode] = useState<EpisodeDetail | null>(null);
+  const [localSummary, setLocalSummary] = useState<EpisodeSummary | null>(null);
+  const [notFound, setNotFound] = useState(false);
   const [selectedShardId, setSelectedShardId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [episodeTitle, setEpisodeTitle] = useState<string>('');
   const [episodeNote, setEpisodeNote] = useState<string>('');
+
+  const [showRawShards, setShowRawShards] = useState(false);
+  const [curatedShardIds, setCuratedShardIds] = useState<string[] | null>(null);
 
   const [reviewStatus, setReviewStatus] = useState<ShardUserStatus>('draft');
   const [reviewTagsText, setReviewTagsText] = useState<string>('');
@@ -97,9 +106,10 @@ export default function ClipDetailPage() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  const episodeForSelection = episode ?? remoteEpisode ?? localEpisode;
   const selectedShard =
-    episode?.shards.find((s) => s.id === selectedShardId) ??
-    (episode?.shards[0] ?? null);
+    episodeForSelection?.shards.find((s) => s.id === selectedShardId) ??
+    (episodeForSelection?.shards[0] ?? null);
 
   const { state: analysisState, errorMessage } = useShardAnalysisState(selectedShard);
   const hasSemanticAnalysis = Boolean(
@@ -172,16 +182,34 @@ export default function ClipDetailPage() {
 
     async function run() {
       setLoading(true);
+      setNotFound(false);
+      setRemoteEpisode(null);
       try {
-        const data = await EpisodeStore.getEpisodeById(episodeId);
-        const shards = await EmoShardStore.getByEpisodeId(episodeId);
+        const [data, shards, summary] = await Promise.all([
+          EpisodeStore.getEpisodeById(episodeId),
+          EmoShardStore.getByEpisodeId(episodeId),
+          EpisodeStore.getEpisodeSummary(episodeId),
+        ]);
         if (ignore) return;
 
-        const nextEpisode = data ? { ...data, shards } : null;
+        setLocalSummary(summary);
+
+        const curatedIdsFromSummary = summary?.curatedShardIds ?? null;
+        setCuratedShardIds(curatedIdsFromSummary);
+
+        const curatedSet = curatedIdsFromSummary ? new Set(curatedIdsFromSummary) : null;
+        const visibleLocalShards = showRawShards
+          ? shards
+          : curatedSet
+            ? shards.filter((s) => curatedSet.has(s.id))
+            : [];
+
+        const nextEpisode = data ? { ...data, shards: visibleLocalShards } : null;
+        setLocalEpisode(nextEpisode);
         console.log('clips/[id] loaded from IndexedDB', {
           episodeId,
           found: Boolean(nextEpisode),
-          shardCount: shards.length,
+          shardCount: visibleLocalShards.length,
         });
 
         setEpisode(nextEpisode);
@@ -190,12 +218,100 @@ export default function ClipDetailPage() {
         setEpisodeTitle(nextEpisode?.title ?? '');
         setEpisodeNote(nextEpisode?.note ?? '');
 
+        const hasLocal = Boolean(nextEpisode);
+
         if (firstShard) {
           const user = firstShard.analysis?.user;
           setReviewStatus(user?.status ?? 'draft');
           setReviewTagsText((user?.userTags ?? []).join(', '));
           setReviewNotes(user?.userNotes ?? '');
           setReviewTranscriptOverride(user?.transcriptOverride ?? '');
+        }
+
+        if (dataMode === 'api') {
+          try {
+            const client = getEpisodeClient();
+            const remote = await client.getEpisodeDetail(episodeId);
+            if (ignore) return;
+
+            if (!remote) {
+              if (!hasLocal) setNotFound(true);
+              return;
+            }
+
+            setRemoteEpisode(remote);
+
+            const localById = new Map((shards ?? []).map((s) => [s.id, s]));
+            const mergedShards: EmoShard[] = (remote.shards ?? []).map((r) => {
+              const local = localById.get(r.id);
+              const localMeta = (local as unknown as { meta?: Record<string, unknown> })?.meta;
+              const remoteMeta = (r as unknown as { meta?: Record<string, unknown> })?.meta;
+              const localAnalysis = (local as unknown as { analysis?: Record<string, unknown> })?.analysis;
+              const remoteAnalysis = (r as unknown as { analysis?: Record<string, unknown> })?.analysis;
+              return {
+                ...(local ?? {}),
+                ...r,
+                meta: {
+                  ...(localMeta ?? {}),
+                  ...(remoteMeta ?? {}),
+                },
+                analysis: {
+                  ...(localAnalysis ?? {}),
+                  ...(remoteAnalysis ?? {}),
+                },
+                audioBlob: local?.audioBlob,
+                audioSampleRate: local?.audioSampleRate,
+                audioDurationSeconds: local?.audioDurationSeconds,
+                features: local?.features ?? r.features,
+                suggestedTags: local?.suggestedTags ?? r.suggestedTags,
+              };
+            });
+
+            const mergedById = new Map(mergedShards.map((s) => [s.id, s]));
+            for (const s of shards ?? []) {
+              if (!mergedById.has(s.id)) mergedById.set(s.id, s);
+            }
+
+            const mergedAll = Array.from(mergedById.values()).sort(
+              (a, b) => (a.startTime ?? 0) - (b.startTime ?? 0)
+            );
+
+            const curatedSet = curatedIdsFromSummary ? new Set(curatedIdsFromSummary) : null;
+            const mergedVisible = showRawShards
+              ? mergedAll
+              : curatedSet
+                ? mergedAll.filter((s) => curatedSet.has(s.id))
+                : mergedAll;
+
+            setEpisode((prev) => {
+              const base = prev ?? nextEpisode ?? remote;
+              if (!base) return base;
+              return {
+                ...base,
+                shards: mergedVisible,
+                stats: remote.stats ?? base.stats,
+              };
+            });
+
+            setSelectedShardId((prev) => {
+              if (prev && mergedVisible.some((s) => s.id === prev)) return prev;
+              return mergedVisible[0]?.id ?? null;
+            });
+
+            void (async () => {
+              try {
+                await Promise.all(mergedAll.map((s) => EmoShardStore.save({ ...s, episodeId })));
+                await EpisodeStore.refreshEpisodeComputedFields(episodeId);
+              } catch (err) {
+                console.error('clips/[id] failed to persist merged remote shards', err);
+              }
+            })();
+          } catch (err) {
+            console.error('[EVA1] failed to load episode from EVA2', err);
+            if (!hasLocal) setNotFound(true);
+          }
+        } else if (!hasLocal) {
+          setNotFound(true);
         }
       } finally {
         if (ignore) return;
@@ -208,7 +324,7 @@ export default function ClipDetailPage() {
     return () => {
       ignore = true;
     };
-  }, [episodeId]);
+  }, [dataMode, episodeId, showRawShards]);
 
   const selectShard = useCallback((shard: EmoShard) => {
     setSelectedShardId(shard.id);
@@ -347,8 +463,8 @@ export default function ClipDetailPage() {
     const tags = parseUserTags();
     const notes = reviewNotes.trim();
 
-    if (reviewStatus !== 'reviewed' && reviewStatus !== 'readyToPublish') {
-      setPublishError('Antes de publicar, cambia el status a reviewed o readyToPublish.');
+    if (reviewStatus !== 'readyToPublish') {
+      setPublishError('Antes de publicar, cambia el status a readyToPublish.');
       return;
     }
 
@@ -372,7 +488,7 @@ export default function ClipDetailPage() {
 
       if (!updated) {
         setPublishError(
-          'No pude publicar el shard. EVA 2 todavía no tiene este endpoint (404). Tus cambios locales sí se guardaron.'
+          'Este fragmento todavía no está sincronizado con el análisis. Guarda tus cambios y vuelve a intentarlo después de que EVA 2 procese los datos.'
         );
         return;
       }
@@ -386,8 +502,11 @@ export default function ClipDetailPage() {
       const message = String((err as Error | undefined)?.message ?? '');
       if (message.includes('http_404')) {
         setPublishError(
-          'No pude publicar el shard. EVA 2 todavía no tiene este endpoint (404). Tus cambios locales sí se guardaron.'
+          'No pude publicar el shard. EVA 2 todavía no conoce este shard (404: Shard not found). Aún no está en la base de datos de análisis.'
         );
+      } else if (message.includes('http_400_')) {
+        const detail = message.replace(/^.*http_400_/, '');
+        setPublishError(`EVA 2 rechazó la publicación (400): ${detail}`);
       } else {
         setPublishError('No pude publicar el shard. Revisa la conexión con EVA 2 e intenta de nuevo.');
       }
@@ -472,7 +591,7 @@ export default function ClipDetailPage() {
     );
   }
 
-  if (!episode || !selectedShard) {
+  if (notFound && !localEpisode && !remoteEpisode) {
     return (
       <main className="min-h-screen bg-slate-950 text-slate-50 p-6">
         <div className="max-w-xl mx-auto space-y-4">
@@ -488,13 +607,80 @@ export default function ClipDetailPage() {
     );
   }
 
-  const fallbackTitle = `Episodio del ${new Date(episode.createdAt).toLocaleString('es-MX')}`;
+  const localShardCount =
+    localSummary?.shardCount ?? (localEpisode?.shards?.length ?? 0);
+  const remoteShardCount = remoteEpisode?.shards?.length ?? 0;
+
+  const hasLocalShards = localShardCount > 0;
+  const hasRemoteShards = remoteShardCount > 0;
+
+  const isShellEpisode =
+    !hasLocalShards &&
+    !hasRemoteShards &&
+    (localEpisode != null || localSummary != null || remoteEpisode != null);
+
+  if (isShellEpisode) {
+    return (
+      <main className="min-h-screen bg-slate-950 text-slate-50 p-6">
+        <div className="max-w-xl mx-auto space-y-4">
+          <h1 className="text-xl font-bold">Este episodio está vacío</h1>
+          <p className="text-sm text-slate-300">
+            Este episodio no tiene momentos guardados (0 shards). Puede provenir de una sesión anterior que no llegó a guardar audio.
+          </p>
+          <p className="text-xs text-slate-400">
+            Puedes borrarlo desde la lista de clips o usar el botón “Limpiar episodios vacíos (solo local)” en la pantalla principal.
+          </p>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/clips"
+              className="text-xs font-semibold text-emerald-400 hover:text-emerald-300"
+            >
+              Volver a clips
+            </Link>
+            <Link
+              href="/"
+              className="text-xs font-semibold text-slate-300 hover:text-slate-200"
+            >
+              Ir a Home
+            </Link>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  const episodeResolved = episode ?? remoteEpisode ?? localEpisode;
+  const selectedShardResolved = selectedShard;
+
+  if (!episodeResolved || !selectedShardResolved) {
+    return (
+      <main className="min-h-screen bg-slate-950 text-slate-50 p-6">
+        <div className="max-w-xl mx-auto space-y-4">
+          <p className="text-sm text-slate-300">No hay datos suficientes para mostrar este episodio.</p>
+          <Link
+            href="/clips"
+            className="text-xs font-semibold text-emerald-400 hover:text-emerald-300"
+          >
+            Volver a la lista
+          </Link>
+        </div>
+      </main>
+    );
+  }
+
+  const fallbackTitle = `Episodio del ${new Date(episodeResolved.createdAt).toLocaleString('es-MX')}`;
   const title = episodeTitle.trim() ? episodeTitle.trim() : fallbackTitle;
+  const hasLocal = Boolean(localEpisode);
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 p-6">
       <div className="max-w-5xl mx-auto space-y-6">
         <header className="space-y-2">
+          {hasLocal && !remoteEpisode && dataMode === 'api' && (
+            <p className="text-xs text-amber-400 mb-2">
+              Trabajando solo con datos locales (backend no disponible o episodio no encontrado en EVA&nbsp;2).
+            </p>
+          )}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <h1 className="text-2xl font-bold">{title}</h1>
@@ -506,6 +692,25 @@ export default function ClipDetailPage() {
             >
               Volver
             </Link>
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-xs text-slate-400">
+              {curatedShardIds?.length ? (
+                <>Mostrando {showRawShards ? 'todos' : 'solo curados'} · Curados: {curatedShardIds.length}</>
+              ) : (
+                <>Este episodio aún no tiene shards curados.</>
+              )}
+            </div>
+            <label className="text-xs text-slate-400 flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={showRawShards}
+                onChange={(e) => setShowRawShards(e.target.checked)}
+                className="accent-emerald-600"
+              />
+              Incluir shards sin curar (debug)
+            </label>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -538,10 +743,10 @@ export default function ClipDetailPage() {
             </div>
           </div>
 
-          <p className="text-xs text-slate-400">ID: {episode.id}</p>
-          {episode.stats && (
+          <p className="text-xs text-slate-400">ID: {episodeResolved.id}</p>
+          {episodeResolved.stats && (
             <div className="text-xs text-slate-400">
-              Shards: {episode.stats.shardCount} · Duración total: {episode.stats.totalDurationSeconds.toFixed(1)} s · Crisis: {episode.stats.crisisCount} · Follow-up: {episode.stats.followupCount}
+              Shards: {episodeResolved.stats.shardCount} · Duración total: {episodeResolved.stats.totalDurationSeconds.toFixed(1)} s · Crisis: {episodeResolved.stats.crisisCount} · Follow-up: {episodeResolved.stats.followupCount}
             </div>
           )}
         </header>
@@ -562,13 +767,13 @@ export default function ClipDetailPage() {
 
           {hasSemanticAnalysis ? (
             <div className="text-xs text-slate-400 space-y-1">
-              {selectedShard.analysisAt && (
+              {selectedShardResolved.analysisAt && (
                 <div>
-                  Analizado el: {new Date(selectedShard.analysisAt).toLocaleString('es-MX')}
+                  Analizado el: {new Date(selectedShardResolved.analysisAt).toLocaleString('es-MX')}
                 </div>
               )}
-              {selectedShard.analysisVersion && (
-                <div>Versión de análisis: {selectedShard.analysisVersion}</div>
+              {selectedShardResolved.analysisVersion && (
+                <div>Versión de análisis: {selectedShardResolved.analysisVersion}</div>
               )}
             </div>
           ) : analysisState === 'analyzing' ? (
@@ -624,7 +829,7 @@ export default function ClipDetailPage() {
                       }
                     }}
                     className={`w-full text-left rounded-lg border border-slate-800 bg-slate-900/40 p-3 transition hover:border-slate-700 cursor-pointer ${
-                      s.id === selectedShard.id ? 'ring-2 ring-emerald-600/50' : ''
+                      s.id === selectedShardResolved.id ? 'ring-2 ring-emerald-600/50' : ''
                     } ${isDeleted ? 'opacity-60' : ''}`}
                   >
                     <div className="flex items-start justify-between gap-2">
@@ -695,7 +900,7 @@ export default function ClipDetailPage() {
           </div>
           <div className="md:col-span-2 border border-slate-800 rounded-xl p-4">
             <ShardDetailPanel
-              shard={selectedShard}
+              shard={selectedShardResolved}
               onChange={handleChange}
               onTagAdd={handleTagAdd}
               onTagRemove={handleTagRemove}
@@ -706,12 +911,12 @@ export default function ClipDetailPage() {
               <h2 className="text-sm font-semibold">Revisión (editor interno)</h2>
 
               <div className="flex items-center gap-2">
-                {selectedShard.publishState === 'published' ? (
+                {selectedShardResolved.publishState === 'published' ? (
                   <span className="inline-flex items-center px-2 py-0.5 rounded-full border text-[11px] font-semibold bg-emerald-900/40 text-emerald-200 border-emerald-800">
                     Publicado
                   </span>
                 ) : null}
-                {selectedShard.deleted ? (
+                {selectedShardResolved.deleted ? (
                   <span className="inline-flex items-center px-2 py-0.5 rounded-full border text-[11px] font-semibold bg-red-900/40 text-red-200 border-red-800">
                     Eliminado
                   </span>
@@ -766,9 +971,9 @@ export default function ClipDetailPage() {
               <button
                 type="button"
                 onClick={handleSaveShardReview}
-                disabled={Boolean(selectedShard.deleted)}
+                disabled={Boolean(selectedShardResolved.deleted)}
                 className={`w-full h-10 rounded-full text-sm font-semibold ${
-                  selectedShard.deleted
+                  selectedShardResolved.deleted
                     ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
                     : 'bg-sky-700 hover:bg-sky-600'
                 }`}
@@ -779,18 +984,29 @@ export default function ClipDetailPage() {
               <button
                 type="button"
                 onClick={handlePublishShard}
-                disabled={dataMode !== 'api' || publishing || Boolean(selectedShard.deleted)}
+                disabled={
+                  dataMode !== 'api' ||
+                  publishing ||
+                  Boolean(selectedShardResolved.deleted) ||
+                  reviewStatus !== 'readyToPublish'
+                }
                 className={`w-full h-10 rounded-full text-sm font-semibold ${
-                  selectedShard.deleted
+                  selectedShardResolved.deleted
                     ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
                     : dataMode !== 'api'
                       ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
                       : publishing
                       ? 'bg-emerald-800 text-emerald-100 cursor-wait'
+                      : reviewStatus !== 'readyToPublish'
+                      ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
                       : 'bg-emerald-700 hover:bg-emerald-600'
                 }`}
               >
-                {publishing ? 'Publicando…' : 'Publicar Emo-Shard'}
+                {publishing
+                  ? 'Publicando…'
+                  : reviewStatus !== 'readyToPublish'
+                    ? 'Primero marca listo para publicar'
+                    : 'Publicar Emo-Shard'}
               </button>
 
               <button
@@ -800,9 +1016,9 @@ export default function ClipDetailPage() {
                   setDeleteError(null);
                   setPublishError(null);
                 }}
-                disabled={dataMode !== 'api' || deleting || Boolean(selectedShard.deleted)}
+                disabled={dataMode !== 'api' || deleting || Boolean(selectedShardResolved.deleted)}
                 className={`w-full h-10 rounded-full text-sm font-semibold border ${
-                  selectedShard.deleted
+                  selectedShardResolved.deleted
                     ? 'border-slate-800 text-slate-500 cursor-not-allowed'
                     : dataMode !== 'api'
                       ? 'border-slate-800 text-slate-500 cursor-not-allowed'
@@ -855,6 +1071,10 @@ export default function ClipDetailPage() {
                   </div>
                 </div>
               ) : null}
+            </div>
+
+            <div className="mt-6">
+              <EpisodeInsightsPanel episodeId={episodeId} dataMode={dataMode} />
             </div>
           </div>
         </div>

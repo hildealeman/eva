@@ -1,4 +1,5 @@
 import type { EpisodeDetail, EpisodeSummary, EmoShard } from '@/types/emotion';
+import type { EpisodeInsightsResponse } from '@/types/episodeInsights';
 import {
   getCloudAnalysisBaseUrl,
   getEvaAnalysisMode,
@@ -11,6 +12,7 @@ import { EmoShardStore } from '@/lib/store/EmoShardStore';
 export interface EpisodeClient {
   getAllEpisodes(): Promise<EpisodeSummary[]>;
   getEpisodeDetail(id: string): Promise<EpisodeDetail | null>;
+  getEpisodeInsights(id: string): Promise<EpisodeInsightsResponse>;
   updateEpisodeMeta(
     id: string,
     updates: { title?: string | null; note?: string | null }
@@ -34,6 +36,11 @@ class LocalEpisodeClient implements EpisodeClient {
 
   async getEpisodeDetail(id: string): Promise<EpisodeDetail | null> {
     return EpisodeStore.getEpisodeById(id);
+  }
+
+  async getEpisodeInsights(id: string): Promise<EpisodeInsightsResponse> {
+    void id;
+    throw new Error('backend_unavailable');
   }
 
   async updateEpisodeMeta(
@@ -138,6 +145,18 @@ class ApiEpisodeClient implements EpisodeClient {
     return coerceEpisodeDetail(json);
   }
 
+  async getEpisodeInsights(id: string): Promise<EpisodeInsightsResponse> {
+    const url = `${this.baseUrl}/episodes/${encodeURIComponent(id)}/insights`;
+    const response = await fetch(url, { method: 'GET' });
+
+    if (!response.ok) {
+      console.error('EVA episode insights endpoint error', response.status);
+      throw new Error(`http_${response.status}`);
+    }
+
+    return (await response.json()) as EpisodeInsightsResponse;
+  }
+
   async updateEpisodeMeta(
     id: string,
     updates: { title?: string | null; note?: string | null }
@@ -227,7 +246,38 @@ class ApiEpisodeClient implements EpisodeClient {
       });
 
       if (!response.ok) {
-        console.error('EVA publish shard endpoint error', response.status);
+        if (response.status === 404) {
+          console.warn(
+            'EVA publishShard: shard no encontrado en EVA 2, probablemente aún no sincronizado',
+            shardId,
+            response.status
+          );
+          return null;
+        }
+        if (response.status === 400) {
+          try {
+            const json = (await response.json()) as { detail?: unknown };
+            const detail = typeof json?.detail === 'string' ? json.detail : null;
+
+            console.info('[EVA1] publishShard 400 (esperado en algunos casos)', {
+              status: response.status,
+              detail,
+            });
+
+            if (detail) {
+              throw new Error(`http_400_${detail}`);
+            }
+          } catch (err) {
+            if (err instanceof Error && err.message.startsWith('http_400_')) throw err;
+          }
+        }
+
+        if (response.status >= 500) {
+          console.error('EVA publish shard endpoint error', response.status);
+        } else {
+          console.warn('EVA publish shard endpoint non-OK response', response.status);
+        }
+
         throw new Error(`http_${response.status}`);
       }
 

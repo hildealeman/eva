@@ -26,6 +26,10 @@ import EVAStatusCard from '@/components/status/EVAStatusCard';
 import MyRoleCard from '@/components/community/MyRoleCard';
 import ProgressCard from '@/components/community/ProgressCard';
 import InvitationsPanel from '@/components/profile/InvitationsPanel';
+import MyFeedPanel from '@/components/feed/MyFeedPanel';
+import { getEvaDataMode } from '@/lib/config/evaAnalysisConfig';
+import { getUploadQueue } from '@/lib/state/uploadQueue';
+import { curateEpisode } from '@/lib/api/curateEpisode';
 
 const SAMPLE_RATE = 44100;
 const BUFFER_SECONDS = 30;
@@ -42,14 +46,44 @@ type PendingEpisode = {
   peakIntensity: number;
 };
 
+type SessionMode = 'listen' | 'conversation' | 'present';
+type SessionPhase = 'idle' | 'recording' | 'finalizing' | 'uploading' | 'curating';
+
+type RecordingDurationMinutes = number | null;
+
+const DURATION_OPTIONS: Array<{ label: string; minutes: RecordingDurationMinutes }> = [
+  { label: '5 min', minutes: 5 },
+  { label: '10 min', minutes: 10 },
+  { label: '20 min', minutes: 20 },
+  { label: '30 min', minutes: 30 },
+  { label: 'Sin límite', minutes: null },
+];
+
 export default function Home() {
+  const dataMode = getEvaDataMode();
+  const [mode, setMode] = useState<SessionMode>('listen');
+  const [sessionPhase, setSessionPhase] = useState<SessionPhase>('idle');
   const [isListening, setIsListening] = useState(false);
   const [rms, setRms] = useState(0);
   const [recentClips, setRecentClips] = useState<EmoShard[]>([]);
+  const [recentClipsLoaded, setRecentClipsLoaded] = useState(false);
   const [debugInfo, setDebugInfo] = useState<EmotionDebugInfo | null>(null);
   const [eventCount, setEventCount] = useState(0);
   const [currentEpisodeId, setCurrentEpisodeId] = useState<string | null>(null);
   const [currentEpisodeCreatedAt, setCurrentEpisodeCreatedAt] = useState<string | null>(null);
+
+  const [uploadSnapshot, setUploadSnapshot] = useState(() => getUploadQueue().getSnapshot());
+  const [sessionMessage, setSessionMessage] = useState<string | null>(null);
+  const [showRawShards, setShowRawShards] = useState(false);
+  const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null);
+  const [purgingEmptyEpisodes, setPurgingEmptyEpisodes] = useState(false);
+  const [resetMessage, setResetMessage] = useState<string | null>(null);
+  const [resettingLocalData, setResettingLocalData] = useState(false);
+  const [durationByMode, setDurationByMode] = useState<Record<SessionMode, RecordingDurationMinutes>>({
+    listen: 10,
+    conversation: 20,
+    present: 30,
+  });
 
   const audioManagerRef = useRef<AudioInputManager | null>(null);
   const bufferRef = useRef<AudioBufferRing | null>(null);
@@ -58,6 +92,7 @@ export default function Home() {
 
   const pendingEpisodeRef = useRef<PendingEpisode | null>(null);
   const finalizeTimerRef = useRef<number | null>(null);
+  const recordingTimeoutRef = useRef<number | null>(null);
 
   const finalizeEpisode = useCallback(async (episode: PendingEpisode) => {
     const buffer = bufferRef.current;
@@ -102,6 +137,7 @@ export default function Home() {
       audioSampleRate: SAMPLE_RATE,
       }),
       episodeId,
+      meta: { mode },
     };
 
     async function runAnalysisForShard(saved: EmoShard) {
@@ -118,10 +154,177 @@ export default function Home() {
       setRecentClips((prev) => [shard, ...prev].slice(0, MAX_RECENT));
 
       void runAnalysisForShard(shard);
+      if (dataMode === 'api') {
+        getUploadQueue().enqueue({
+          localShardId: shard.id,
+          episodeId,
+          audioBlob,
+          startTime,
+          endTime,
+          meta: { mode },
+        });
+      }
     } catch (e) {
       console.error('Error guardando clip:', e);
     }
-  }, [currentEpisodeId]);
+  }, [currentEpisodeId, dataMode, mode]);
+
+  const finalizeEpisodeAndCurate = useCallback(
+    async (episodeId: string) => {
+      setSessionMessage(null);
+
+      setSessionPhase('uploading');
+
+      const queue = getUploadQueue();
+      const { hadFailures } = await queue.waitForIdle();
+      if (hadFailures) {
+        setSessionMessage('Algunos momentos no se pudieron subir, pero EVA seguirá con lo que tiene.');
+      }
+
+      if (dataMode !== 'api') {
+        setSessionPhase('idle');
+        return;
+      }
+
+      setSessionPhase('curating');
+      try {
+        const res = await curateEpisode(episodeId, 5);
+        if (!res.success) {
+          if (res.status === 404 || res.status === 501) {
+            setSessionMessage('Curación aún no disponible.');
+            return;
+          }
+          setSessionMessage('No se pudo curar el episodio.');
+          return;
+        }
+
+        const detail = res.data;
+        if (!detail) return;
+
+        try {
+          const curated: EmoShard[] = [];
+          for (const r of detail.shards ?? []) {
+            const local = await EmoShardStore.get(r.id);
+            const localMeta = (local as unknown as { meta?: Record<string, unknown> })?.meta;
+            const remoteMeta = (r as unknown as { meta?: Record<string, unknown> })?.meta;
+            const localAnalysis = (local as unknown as { analysis?: Record<string, unknown> })?.analysis;
+            const remoteAnalysis = (r as unknown as { analysis?: Record<string, unknown> })?.analysis;
+
+            const merged: EmoShard = {
+              ...(local ?? ({} as EmoShard)),
+              ...r,
+              meta: { ...(localMeta ?? {}), ...(remoteMeta ?? {}) },
+              analysis: { ...(localAnalysis ?? {}), ...(remoteAnalysis ?? {}) },
+              audioBlob: local?.audioBlob,
+              audioSampleRate: local?.audioSampleRate,
+              audioDurationSeconds: local?.audioDurationSeconds,
+              features: local?.features ?? r.features,
+              suggestedTags: local?.suggestedTags ?? r.suggestedTags,
+              episodeId,
+            };
+
+            await EmoShardStore.save(merged);
+            curated.push(merged);
+          }
+
+          if (curated.length > 0) {
+            await EpisodeStore.markCuratedShards(episodeId, curated);
+            const sortedCurated = [...curated].sort(
+              (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+            );
+            setRecentClips(sortedCurated.slice(0, MAX_RECENT));
+          }
+
+          await EpisodeStore.refreshEpisodeComputedFields(episodeId);
+        } catch (err) {
+          console.error('[EVA1] Failed to sync curated episode locally', err);
+        }
+      } finally {
+        setSessionPhase('idle');
+      }
+    },
+    [dataMode]
+  );
+
+  const handleChunk = useCallback((samples: Float32Array, timeSeconds: number) => {
+    const buffer = bufferRef.current;
+    const extractor = extractorRef.current;
+    const detector = detectorRef.current;
+    if (!buffer || !extractor || !detector) return;
+
+    buffer.push(samples);
+
+    const features = extractor.extract(samples);
+    if (!features) return;
+
+    setRms(features.rms);
+    detector.processChunk(features, timeSeconds);
+  }, []);
+
+  const stopSession = useCallback(async () => {
+    const manager = audioManagerRef.current;
+    if (!manager) return;
+
+    if (recordingTimeoutRef.current != null) {
+      window.clearTimeout(recordingTimeoutRef.current);
+      recordingTimeoutRef.current = null;
+    }
+
+    if (finalizeTimerRef.current != null) {
+      window.clearTimeout(finalizeTimerRef.current);
+      finalizeTimerRef.current = null;
+    }
+
+    const episodeId = currentEpisodeId;
+    setSessionPhase('finalizing');
+
+    // Stop mic immediately (no awaits).
+    manager.stop();
+    setIsListening(false);
+    setRms(0);
+
+    const ep = pendingEpisodeRef.current;
+    if (ep) {
+      pendingEpisodeRef.current = null;
+      await finalizeEpisode(ep);
+    }
+
+    if (episodeId) {
+      void finalizeEpisodeAndCurate(episodeId);
+    } else {
+      setSessionPhase('idle');
+    }
+  }, [currentEpisodeId, finalizeEpisode, finalizeEpisodeAndCurate]);
+
+  const startSession = useCallback(async () => {
+    const manager = audioManagerRef.current;
+    if (!manager) return;
+
+    const isCriticalPhase =
+      sessionPhase === 'finalizing' || sessionPhase === 'uploading' || sessionPhase === 'curating';
+    if (isCriticalPhase) {
+      alert('Espera a que EVA termine de subir/curar antes de iniciar una nueva sesión.');
+      return;
+    }
+
+    const episodeId = crypto.randomUUID();
+    const nowIso = new Date().toISOString();
+    setCurrentEpisodeId(episodeId);
+    setCurrentEpisodeCreatedAt(nowIso);
+    await ensureEvaDb();
+    await EpisodeStore.upsertEpisodeSummary({
+      id: episodeId,
+      title: null,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      shardCount: 0,
+      durationSeconds: 0,
+    });
+
+    await manager.start((samples, timeSeconds) => handleChunk(samples, timeSeconds));
+    setIsListening(true);
+    setSessionPhase('recording');
+  }, [handleChunk, sessionPhase]);
 
   const handleEmotionEvent = useCallback(
     (event: EmotionEvent) => {
@@ -202,6 +405,7 @@ export default function Home() {
         audioSampleRate: SAMPLE_RATE,
       }),
       episodeId,
+      meta: { mode },
     };
     await EmoShardStore.save(shard);
     await EpisodeStore.recordShard(episodeId, shard);
@@ -209,7 +413,7 @@ export default function Home() {
     setRecentClips((prev) => [shard, ...prev].slice(0, MAX_RECENT));
     setEventCount((prev) => prev + 1);
     alert('Se creó un clip de prueba. Revisa /clips.');
-  }, []);
+  }, [mode]);
 
   useEffect(() => {
     audioManagerRef.current = new AudioInputManager();
@@ -219,19 +423,70 @@ export default function Home() {
       setDebugInfo(info);
     });
 
+    const queue = getUploadQueue();
+    queue.configure({
+      onUploaded: async ({ localShardId, remoteShard, episodeId }) => {
+        try {
+          const existing = await EmoShardStore.get(localShardId);
+          const existingMeta = (existing as unknown as { meta?: Record<string, unknown> })?.meta;
+          const remoteMeta = (remoteShard as unknown as { meta?: Record<string, unknown> })?.meta;
+          const migrated: EmoShard = {
+            ...(existing ?? ({} as EmoShard)),
+            ...remoteShard,
+            id: remoteShard.id,
+            episodeId,
+            meta: { ...(existingMeta ?? {}), ...(remoteMeta ?? {}) },
+            audioBlob: existing?.audioBlob,
+            audioSampleRate: existing?.audioSampleRate,
+            audioDurationSeconds: existing?.audioDurationSeconds,
+            features: existing?.features ?? remoteShard.features,
+            suggestedTags: existing?.suggestedTags ?? remoteShard.suggestedTags,
+          };
+
+          await EmoShardStore.save(migrated);
+          if (remoteShard.id !== localShardId) {
+            await EmoShardStore.delete(localShardId);
+          }
+          await EpisodeStore.refreshEpisodeComputedFields(episodeId);
+
+          setRecentClips((prev) => prev.map((c) => (c.id === localShardId ? migrated : c)));
+        } catch (err) {
+          console.error('[EVA1] Failed to migrate local shard after upload', err);
+        }
+      },
+    });
+
+    const unsubscribe = queue.subscribe(() => {
+      setUploadSnapshot(queue.getSnapshot());
+    });
+
     EmoShardStore.getAll()
       .then((all) => {
-        const sorted = [...all].sort(
-          (a, b) =>
-            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-        );
-        setRecentClips(sorted.slice(0, MAX_RECENT));
+        void (async () => {
+          const episodes = await EpisodeStore.getAllEpisodes();
+          const curatedIds = new Set<string>();
+          for (const e of episodes) {
+            for (const id of e.curatedShardIds ?? []) curatedIds.add(id);
+          }
+
+          const filtered = showRawShards
+            ? all
+            : all.filter((s) => curatedIds.size > 0 && curatedIds.has(s.id));
+
+          const sorted = [...filtered].sort(
+            (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+          );
+          setRecentClips(sorted.slice(0, MAX_RECENT));
+          setRecentClipsLoaded(true);
+        })();
       })
       .catch((e) => {
         console.error('Error cargando clips:', e);
+        setRecentClipsLoaded(true);
       });
 
     return () => {
+      unsubscribe();
       audioManagerRef.current?.stop();
 
       if (finalizeTimerRef.current != null) {
@@ -245,58 +500,43 @@ export default function Home() {
         void finalizeEpisode(ep);
       }
     };
-  }, [finalizeEpisode, handleEmotionEvent]);
+  }, [finalizeEpisode, handleEmotionEvent, showRawShards]);
 
-  const handleChunk = useCallback((samples: Float32Array, timeSeconds: number) => {
-    const buffer = bufferRef.current;
-    const extractor = extractorRef.current;
-    const detector = detectorRef.current;
-    if (!buffer || !extractor || !detector) return;
+  useEffect(() => {
+    if (recordingTimeoutRef.current != null) {
+      window.clearTimeout(recordingTimeoutRef.current);
+      recordingTimeoutRef.current = null;
+    }
 
-    buffer.push(samples);
+    if (sessionPhase !== 'recording') return;
 
-    const features = extractor.extract(samples);
-    if (!features) return;
+    const minutes = durationByMode[mode];
+    if (minutes == null) return;
 
-    setRms(features.rms);
-    detector.processChunk(features, timeSeconds);
-  }, []);
+    recordingTimeoutRef.current = window.setTimeout(() => {
+      void stopSession();
+    }, minutes * 60 * 1000);
+
+    return () => {
+      if (recordingTimeoutRef.current != null) {
+        window.clearTimeout(recordingTimeoutRef.current);
+        recordingTimeoutRef.current = null;
+      }
+    };
+  }, [durationByMode, mode, sessionPhase, stopSession]);
 
   const toggleListening = useCallback(async () => {
-    const manager = audioManagerRef.current;
-    if (!manager) return;
-
     try {
-      if (manager.isRecording) {
-        const ep = pendingEpisodeRef.current;
-        if (ep) {
-          pendingEpisodeRef.current = null;
-          void finalizeEpisode(ep);
-        }
-
-        manager.stop();
-        setIsListening(false);
-        setRms(0);
+      if (sessionPhase === 'recording') {
+        await stopSession();
       } else {
-        const episodeId = crypto.randomUUID();
-        const nowIso = new Date().toISOString();
-        setCurrentEpisodeId(episodeId);
-        setCurrentEpisodeCreatedAt(nowIso);
-        await ensureEvaDb();
-        await EpisodeStore.upsertEpisodeSummary({
-          id: episodeId,
-          title: null,
-          createdAt: nowIso,
-          updatedAt: nowIso,
-          shardCount: 0,
-          durationSeconds: 0,
-        });
-
-        await manager.start((samples, timeSeconds) => handleChunk(samples, timeSeconds));
-        setIsListening(true);
+        await startSession();
       }
     } catch (error) {
       console.error('Error al iniciar escucha:', error);
+      setIsListening(false);
+      setRms(0);
+      setSessionPhase('idle');
 
       const err = error as unknown as { name?: string; message?: string; stack?: string };
       const message = err?.message ?? '';
@@ -326,7 +566,7 @@ export default function Home() {
       }
 
       if (isMicIssue) {
-        alert('No se pudo acceder al micrófono. Revisa permisos del navegador.');
+        alert('EVA no pudo acceder al micrófono (permiso denegado o dispositivo no disponible).');
         return;
       }
 
@@ -335,7 +575,98 @@ export default function Home() {
           'Revisa la consola para más detalles.'
       );
     }
-  }, [finalizeEpisode, handleChunk]);
+  }, [sessionPhase, startSession, stopSession]);
+
+  const handlePurgeEmptyEpisodesLocal = useCallback(async () => {
+    setMaintenanceMessage(null);
+    setPurgingEmptyEpisodes(true);
+    try {
+      const episodes = await EpisodeStore.getAllEpisodes();
+      const empty = episodes.filter((e) => (e.shardCount ?? 0) === 0);
+
+      if (empty.length === 0) {
+        setMaintenanceMessage('No se encontraron episodios vacíos.');
+        return;
+      }
+
+      for (const ep of empty) {
+        try {
+          await EmoShardStore.deleteByEpisodeId(ep.id);
+        } catch (err) {
+          console.error('[EVA1] purge empty episode failed to delete shards', { episodeId: ep.id, err });
+        }
+        try {
+          await EpisodeStore.deleteEpisodeSummary(ep.id);
+        } catch (err) {
+          console.error('[EVA1] purge empty episode failed to delete summary', { episodeId: ep.id, err });
+        }
+      }
+
+      setMaintenanceMessage(`Se limpiaron ${empty.length} episodios vacíos.`);
+
+      const all = await EmoShardStore.getAll();
+      const episodesAfter = await EpisodeStore.getAllEpisodes();
+      const curatedIds = new Set<string>();
+      for (const e of episodesAfter) {
+        for (const id of e.curatedShardIds ?? []) curatedIds.add(id);
+      }
+
+      const filtered = showRawShards
+        ? all
+        : all.filter((s) => curatedIds.size > 0 && curatedIds.has(s.id));
+
+      const sorted = [...filtered].sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+      setRecentClips(sorted.slice(0, MAX_RECENT));
+      setRecentClipsLoaded(true);
+    } finally {
+      setPurgingEmptyEpisodes(false);
+    }
+  }, [showRawShards]);
+
+  const handleNuclearResetLocal = useCallback(async () => {
+    const ok = window.confirm(
+      'Esto borrará TODOS los clips, audio y episodios guardados en este navegador. ' +
+        'No afectará los datos en EVA 2, pero perderás la reproducción local. ¿Seguro que quieres continuar?'
+    );
+    if (!ok) return;
+
+    setResetMessage(null);
+    setResettingLocalData(true);
+    try {
+      try {
+        audioManagerRef.current?.stop();
+      } catch {}
+
+      await Promise.all([EmoShardStore.clear(), EpisodeStore.clear()]);
+
+      setIsListening(false);
+      setRms(0);
+      setSessionPhase('idle');
+      setEventCount(0);
+      setDebugInfo(null);
+      setRecentClips([]);
+      setRecentClipsLoaded(true);
+      setCurrentEpisodeId(null);
+      setCurrentEpisodeCreatedAt(null);
+      pendingEpisodeRef.current = null;
+
+      if (finalizeTimerRef.current != null) {
+        window.clearTimeout(finalizeTimerRef.current);
+        finalizeTimerRef.current = null;
+      }
+      if (recordingTimeoutRef.current != null) {
+        window.clearTimeout(recordingTimeoutRef.current);
+        recordingTimeoutRef.current = null;
+      }
+
+      setResetMessage('Datos locales borrados. Reiniciando…');
+      window.location.reload();
+    } finally {
+      setResettingLocalData(false);
+    }
+  }, []);
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex items-center justify-center p-4">
@@ -370,12 +701,77 @@ export default function Home() {
 
         <InvitationsPanel />
 
+        <MyFeedPanel dataMode={dataMode} />
+
         <div className="flex flex-col items-center gap-4">
           <LiveLevelMeter rms={rms} isActive={isListening} />
+
+          <div className="w-full flex items-center justify-center">
+            <div className="inline-flex rounded-full border border-slate-700 bg-slate-950/30 p-1">
+              <button
+                type="button"
+                disabled={sessionPhase !== 'idle'}
+                onClick={() => setMode('listen')}
+                className={`px-3 py-1 text-xs font-semibold rounded-full transition ${
+                  mode === 'listen'
+                    ? 'bg-slate-200 text-slate-950'
+                    : 'text-slate-200 hover:bg-slate-900'
+                } ${sessionPhase !== 'idle' ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                Listen
+              </button>
+              <button
+                type="button"
+                disabled={sessionPhase !== 'idle'}
+                onClick={() => setMode('conversation')}
+                className={`px-3 py-1 text-xs font-semibold rounded-full transition ${
+                  mode === 'conversation'
+                    ? 'bg-slate-200 text-slate-950'
+                    : 'text-slate-200 hover:bg-slate-900'
+                } ${sessionPhase !== 'idle' ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                Conversation
+              </button>
+              <button
+                type="button"
+                disabled={sessionPhase !== 'idle'}
+                onClick={() => setMode('present')}
+                className={`px-3 py-1 text-xs font-semibold rounded-full transition ${
+                  mode === 'present'
+                    ? 'bg-slate-200 text-slate-950'
+                    : 'text-slate-200 hover:bg-slate-900'
+                } ${sessionPhase !== 'idle' ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                Present
+              </button>
+            </div>
+          </div>
+
+          <div className="w-full flex items-center justify-center">
+            <select
+              value={String(durationByMode[mode] ?? 'unlimited')}
+              disabled={sessionPhase !== 'idle'}
+              onChange={(e) => {
+                const raw = e.target.value;
+                const minutes = raw === 'unlimited' ? null : Number(raw);
+                setDurationByMode((prev) => ({ ...prev, [mode]: Number.isFinite(minutes) ? minutes : null }));
+              }}
+              className={`h-9 rounded-lg bg-slate-900 border border-slate-800 px-3 text-xs text-slate-100 ${
+                sessionPhase !== 'idle' ? 'opacity-50 cursor-not-allowed' : ''
+              }`}
+            >
+              {DURATION_OPTIONS.map((opt) => (
+                <option key={opt.label} value={opt.minutes == null ? 'unlimited' : String(opt.minutes)}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
 
           <button
             type="button"
             onClick={toggleListening}
+            disabled={sessionPhase !== 'idle' && sessionPhase !== 'recording'}
             className={`w-48 h-12 rounded-full font-semibold transition ${
               isListening
                 ? 'bg-red-600 hover:bg-red-700'
@@ -384,6 +780,36 @@ export default function Home() {
           >
             {isListening ? 'Detener escucha' : 'Iniciar escucha'}
           </button>
+
+          {(sessionPhase !== 'idle' || uploadSnapshot.failedCount > 0 || sessionMessage) && (
+            <div className="w-full rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-300">
+              {sessionPhase === 'recording' ? <div>Grabando… (modo {mode})</div> : null}
+              {sessionPhase === 'finalizing' ? <div>Cerrando sesión…</div> : null}
+              {sessionPhase === 'uploading' ? (
+                <div>
+                  Subiendo momentos… ({uploadSnapshot.pendingCount}/{uploadSnapshot.inFlightCount})
+                </div>
+              ) : null}
+              {sessionPhase === 'curating' ? <div>Curando momentos…</div> : null}
+              {uploadSnapshot.failedCount > 0 ? (
+                <div>Algunos momentos no se pudieron guardar.</div>
+              ) : null}
+              {sessionMessage ? <div>{sessionMessage}</div> : null}
+            </div>
+          )}
+
+          <p className="text-xs text-slate-500 text-center">Modo: {mode}</p>
+
+          <label className="text-xs text-slate-500 flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={showRawShards}
+              onChange={(e) => setShowRawShards(e.target.checked)}
+              disabled={sessionPhase !== 'idle'}
+              className="accent-emerald-600"
+            />
+            Mostrar shards crudos (debug)
+          </label>
 
           <p className="text-xs text-slate-500 text-center">
             {isListening
@@ -439,6 +865,54 @@ export default function Home() {
             </div>
           </div>
 
+          <div className="w-full pt-4 border-t border-slate-800 space-y-2">
+            <div className="text-xs font-semibold text-slate-300">Mantenimiento</div>
+            <button
+              type="button"
+              onClick={handlePurgeEmptyEpisodesLocal}
+              disabled={purgingEmptyEpisodes || sessionPhase !== 'idle'}
+              className={`w-full h-10 rounded-full text-xs font-semibold ${
+                purgingEmptyEpisodes || sessionPhase !== 'idle'
+                  ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-100'
+              }`}
+            >
+              {purgingEmptyEpisodes
+                ? 'Limpiando episodios vacíos…'
+                : 'Limpiar episodios vacíos (solo local)'}
+            </button>
+            <p className="text-[11px] text-slate-500">
+              Borra de este navegador los episodios que no tienen momentos guardados (0 shards). No afecta al backend EVA 2.
+            </p>
+            {maintenanceMessage ? (
+              <p className="text-[11px] text-slate-300">{maintenanceMessage}</p>
+            ) : null}
+          </div>
+
+          <div className="w-full pt-4 border-t border-red-900/60 space-y-2">
+            <div className="text-xs font-semibold text-red-300">Zona de peligro (solo datos locales)</div>
+            <button
+              type="button"
+              onClick={handleNuclearResetLocal}
+              disabled={resettingLocalData || sessionPhase !== 'idle'}
+              className={`w-full h-10 rounded-full text-xs font-semibold ${
+                resettingLocalData || sessionPhase !== 'idle'
+                  ? 'bg-red-950/40 text-red-300/50 cursor-not-allowed border border-red-900/50'
+                  : 'bg-red-900/40 hover:bg-red-900/60 text-red-200 border border-red-800'
+              }`}
+            >
+              {resettingLocalData
+                ? 'Reiniciando…'
+                : 'Reiniciar EVA en este navegador (borrar datos locales)'}
+            </button>
+            <p className="text-[11px] text-slate-500">
+              Esto borra episodios, shards y audio de este navegador. No afecta a EVA 2.
+            </p>
+            {resetMessage ? (
+              <p className="text-[11px] text-slate-300">{resetMessage}</p>
+            ) : null}
+          </div>
+
           <div className="w-full pt-4 border-t border-slate-800 space-y-3">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold">Clips recientes</h2>
@@ -450,10 +924,17 @@ export default function Home() {
               </Link>
             </div>
 
-            {recentClips.length === 0 ? (
-              <p className="text-xs text-slate-500">
-                Aún no hay clips guardados. Cuando EVA detecte un pico de intensidad, aparecerá aquí.
-              </p>
+            {recentClipsLoaded && recentClips.length === 0 ? (
+              <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-5 text-center space-y-2">
+                <div className="text-sm font-semibold text-slate-100">Aún no hay clips</div>
+                <div className="text-xs text-slate-400">
+                  Cuando EVA termine una sesión de escucha, aquí aparecerán tus momentos emocionales más importantes.
+                </div>
+                <div className="text-xs text-slate-400">
+                  Elige un modo (Listen, Conversation o Present) y pulsa{' '}
+                  <span className="font-semibold text-slate-200">Iniciar escucha</span> para crear tu primer episodio.
+                </div>
+              </div>
             ) : (
               <ul className="space-y-2">
                 {recentClips.map((clip) => (
@@ -489,6 +970,22 @@ function RecentClipRow({
 }) {
   const { state } = useShardAnalysisState(clip);
 
+  const rawDuration =
+    typeof clip.features?.duration === 'number' && Number.isFinite(clip.features.duration)
+      ? clip.features.duration
+      : typeof (clip as unknown as { meta?: { startTime?: unknown; endTime?: unknown } })?.meta
+            ?.startTime === 'number' &&
+          typeof (clip as unknown as { meta?: { startTime?: unknown; endTime?: unknown } })?.meta
+            ?.endTime === 'number'
+        ? Math.max(
+            0,
+            ((clip as unknown as { meta: { endTime: number; startTime: number } }).meta.endTime as number) -
+              ((clip as unknown as { meta: { endTime: number; startTime: number } }).meta.startTime as number)
+          )
+        : null;
+
+  const safeSuggestedTags = Array.isArray(clip.suggestedTags) ? clip.suggestedTags : [];
+
   return (
     <li className="border border-slate-800 rounded-lg p-3 flex items-center justify-between">
       <div className="space-y-1 min-w-0">
@@ -509,12 +1006,20 @@ function RecentClipRow({
         </div>
 
         <div className="text-[11px] text-slate-400">
-          Duración: {clip.features.duration.toFixed(2)} s ·{' '}
-          {new Date(clip.createdAt).toLocaleString('es-MX')}
+          {rawDuration != null ? (
+            <>
+              Duración: {rawDuration.toFixed(2)} s ·{' '}
+              {new Date(clip.createdAt).toLocaleString('es-MX')}
+            </>
+          ) : (
+            <>
+              Duración: -- s · {new Date(clip.createdAt).toLocaleString('es-MX')}
+            </>
+          )}
         </div>
-        {clip.suggestedTags.length > 0 && (
+        {safeSuggestedTags.length > 0 && (
           <div className="text-[11px] text-slate-400 truncate">
-            Tags: {clip.suggestedTags.slice(0, 3).join(', ')}
+            Tags: {safeSuggestedTags.slice(0, 3).join(', ')}
           </div>
         )}
       </div>

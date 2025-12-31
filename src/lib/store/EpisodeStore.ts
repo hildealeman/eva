@@ -34,6 +34,16 @@ function computeEpisodeStats(shards: EmoShard[]): EpisodeStats {
   };
 }
 
+function filterCuratedShardsIfPresent(
+  shards: EmoShard[],
+  summary: EpisodeSummary | null
+): EmoShard[] {
+  const curatedIds = summary?.curatedShardIds;
+  if (!curatedIds || curatedIds.length === 0) return shards;
+  const setIds = new Set(curatedIds);
+  return shards.filter((s) => setIds.has(s.id));
+}
+
 function computeEpisodeSummaryFieldsFromShards(shards: EmoShard[]): Pick<
   EpisodeSummary,
   'shardCount' | 'durationSeconds' | 'dominantEmotion' | 'momentTypes' | 'tags'
@@ -97,6 +107,12 @@ export const EpisodeStore = {
   async upsertEpisodeSummary(summary: EpisodeSummary): Promise<void> {
     await ensureEvaDb();
     await set(summary.id, summary, store);
+  },
+
+  async clear(): Promise<void> {
+    await ensureEvaDb();
+    const allKeys = await keys(store);
+    await Promise.all(allKeys.map((k) => del(k as IDBValidKey, store)));
   },
 
   async deleteEpisodeSummary(id: string): Promise<void> {
@@ -187,7 +203,8 @@ export const EpisodeStore = {
         ''
       );
 
-    const stats = computeEpisodeStats(shards);
+    const shardsForStats = filterCuratedShardsIfPresent(shards, summary);
+    const stats = computeEpisodeStats(shardsForStats);
 
     return {
       id,
@@ -199,6 +216,27 @@ export const EpisodeStore = {
       summary: null,
       stats,
     };
+  },
+
+  async markCuratedShards(episodeId: string, curatedShards: EmoShard[]): Promise<void> {
+    await ensureEvaDb();
+    const existing = await this.getEpisodeSummary(episodeId);
+
+    const curatedShardIds = curatedShards.map((s) => s.id);
+    const computed = computeEpisodeSummaryFieldsFromShards(curatedShards);
+    const nowIso = new Date().toISOString();
+
+    const next: EpisodeSummary = {
+      id: episodeId,
+      title: existing?.title ?? null,
+      note: existing?.note ?? null,
+      createdAt: existing?.createdAt ?? nowIso,
+      updatedAt: nowIso,
+      curatedShardIds,
+      ...computed,
+    };
+
+    await this.upsertEpisodeSummary(next);
   },
 
   async recordShard(episodeId: string, shard: EmoShard): Promise<void> {
@@ -232,7 +270,8 @@ export const EpisodeStore = {
     if (!detail) return;
 
     const existing = await this.getEpisodeSummary(episodeId);
-    const computed = computeEpisodeSummaryFieldsFromShards(detail.shards);
+    const shardsForComputed = filterCuratedShardsIfPresent(detail.shards, existing);
+    const computed = computeEpisodeSummaryFieldsFromShards(shardsForComputed);
 
     const next: EpisodeSummary = {
       id: episodeId,
@@ -240,6 +279,7 @@ export const EpisodeStore = {
       note: existing?.note ?? null,
       createdAt: existing?.createdAt ?? detail.createdAt,
       updatedAt: new Date().toISOString(),
+      curatedShardIds: existing?.curatedShardIds,
       ...computed,
     };
 

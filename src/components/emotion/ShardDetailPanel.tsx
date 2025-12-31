@@ -118,7 +118,39 @@ export default function ShardDetailPanel({
   onTagRemove,
   onStatusChange,
 }: ShardDetailPanelProps) {
-  const suggestedTags = buildSuggestedTags(shard);
+  const safeFeatures =
+    (shard as unknown as { features?: Partial<{ rms: unknown; peak: unknown; spectralCentroid: unknown; zcr: unknown; duration: unknown }> })
+      .features ?? {};
+  const safeSuggestedTags = Array.isArray(shard.suggestedTags)
+    ? shard.suggestedTags
+    : buildSuggestedTags(shard);
+
+  const rawDuration =
+    typeof safeFeatures.duration === 'number' && Number.isFinite(safeFeatures.duration)
+      ? safeFeatures.duration
+      : typeof (shard as unknown as { meta?: { startTime?: unknown; endTime?: unknown } })?.meta
+            ?.startTime === 'number' &&
+          typeof (shard as unknown as { meta?: { startTime?: unknown; endTime?: unknown } })?.meta
+            ?.endTime === 'number'
+        ? Math.max(
+            0,
+            ((shard as unknown as { meta: { endTime: number; startTime: number } }).meta.endTime as number) -
+              ((shard as unknown as { meta: { endTime: number; startTime: number } }).meta.startTime as number)
+          )
+        : null;
+
+  const rawIntensity =
+    typeof shard.intensity === 'number' && Number.isFinite(shard.intensity)
+      ? shard.intensity
+      : typeof (shard as unknown as { analysis?: { emotion?: { intensity?: unknown } } })?.analysis
+            ?.emotion?.intensity === 'number' &&
+          Number.isFinite(
+            (shard as unknown as { analysis: { emotion: { intensity: number } } }).analysis.emotion
+              .intensity
+          )
+        ? (shard as unknown as { analysis: { emotion: { intensity: number } } }).analysis.emotion
+            .intensity
+        : null;
   const emotion = useMemo(() => {
     const fromAnalysis = shard.analysis?.emotion as
       | {
@@ -179,10 +211,17 @@ export default function ShardDetailPanel({
     return `${asString}%`;
   }, []);
 
+  const hasLocalBlobAudio = useMemo(() => {
+    const blob = (shard as unknown as { audioBlob?: unknown }).audioBlob;
+    return typeof Blob !== 'undefined' && blob instanceof Blob;
+  }, [shard]);
+
+  const hasPlayableAudio = hasLocalBlobAudio;
+
   const audioUrl = useMemo(() => {
-    if (!shard.audioBlob) return null;
-    return URL.createObjectURL(shard.audioBlob);
-  }, [shard.audioBlob]);
+    if (!hasLocalBlobAudio) return null;
+    return URL.createObjectURL((shard as unknown as { audioBlob: Blob }).audioBlob);
+  }, [hasLocalBlobAudio, shard]);
 
   useEffect(() => {
     if (!audioUrl) return;
@@ -195,15 +234,30 @@ export default function ShardDetailPanel({
     <div className="space-y-6">
       <section className="space-y-2 text-sm">
         <div>Creado: {new Date(shard.createdAt).toLocaleString('es-MX')}</div>
-        <div>Duración: {shard.features.duration.toFixed(2)} s</div>
-        <div>Intensidad: {(shard.intensity * 100).toFixed(1)}%</div>
+        <div>Duración: {rawDuration != null ? `${rawDuration.toFixed(2)} s` : '-- s'}</div>
+        <div>
+          Intensidad:{' '}
+          {rawIntensity != null ? `${(rawIntensity * 100).toFixed(1)}%` : '--'}
+        </div>
       </section>
 
       <section className="space-y-2 text-sm">
         <h2 className="font-semibold text-sm">Audio del momento</h2>
-        {audioUrl ? (
+        {hasPlayableAudio && audioUrl ? (
           <div className="space-y-2">
-            <audio controls src={audioUrl} className="w-full">
+            <audio
+              controls
+              src={audioUrl}
+              className="w-full"
+              onError={(e) => {
+                if (!hasPlayableAudio) return;
+                console.warn('[EVA1] Audio playback error', {
+                  shardId: shard.id,
+                  audioUrl,
+                  eventType: (e as unknown as { type?: string })?.type,
+                });
+              }}
+            >
               Tu navegador no soporta el elemento de audio.
             </audio>
             {shard.audioDurationSeconds != null && (
@@ -214,29 +268,48 @@ export default function ShardDetailPanel({
           </div>
         ) : (
           <p className="text-xs text-slate-500">
-            Este clip aún no tiene audio asociado.
+            Este shard no tiene audio disponible en este navegador (solo datos de análisis).
           </p>
         )}
       </section>
 
-      {shard.transcript && (
-        <section className="space-y-2 text-sm">
-          <h2 className="font-semibold text-sm">Transcripción</h2>
-          <p className="text-sm text-slate-200 whitespace-pre-wrap">
-            {shard.transcript}
-          </p>
-          {shard.transcriptLanguage && (
-            <p className="text-xs text-slate-400">
-              Idioma detectado: {shard.transcriptLanguage}
-            </p>
-          )}
-          {typeof shard.transcriptionConfidence === 'number' && (
-            <p className="text-xs text-slate-400">
-              Confianza: {(shard.transcriptionConfidence * 100).toFixed(1)}%
-            </p>
-          )}
-        </section>
-      )}
+      <section className="space-y-2 text-sm">
+        <h2 className="font-semibold text-sm">Transcripción</h2>
+        {(() => {
+          const meta = (shard as unknown as { meta?: Record<string, unknown> }).meta ?? null;
+          const transcript =
+            (meta && typeof meta.transcript === 'string' ? (meta.transcript as string) : null) ??
+            (typeof shard.transcript === 'string' ? shard.transcript : null);
+          const transcriptLanguage =
+            (meta && typeof meta.transcriptLanguage === 'string'
+              ? (meta.transcriptLanguage as string)
+              : null) ??
+            (typeof shard.transcriptLanguage === 'string' ? shard.transcriptLanguage : null);
+          const transcriptionConfidence =
+            (meta && typeof meta.transcriptionConfidence === 'number'
+              ? (meta.transcriptionConfidence as number)
+              : null) ??
+            (typeof shard.transcriptionConfidence === 'number'
+              ? shard.transcriptionConfidence
+              : null);
+
+          return transcript ? (
+            <>
+              <p className="text-sm text-slate-200 whitespace-pre-wrap">{transcript}</p>
+              {transcriptLanguage ? (
+                <p className="text-xs text-slate-400">Idioma detectado: {transcriptLanguage}</p>
+              ) : null}
+              {typeof transcriptionConfidence === 'number' ? (
+                <p className="text-xs text-slate-400">
+                  Confianza: {(transcriptionConfidence * 100).toFixed(1)}%
+                </p>
+              ) : null}
+            </>
+          ) : (
+            <p className="text-xs text-slate-500">(sin transcripción todavía)</p>
+          );
+        })()}
+      </section>
 
       <section className="space-y-2 text-sm">
         <h2 className="font-semibold text-sm">Lectura emocional</h2>
@@ -270,80 +343,100 @@ export default function ShardDetailPanel({
         )}
       </section>
 
-      {(shard.semantic?.summary ||
-        (shard.semantic?.topics && shard.semantic.topics.length > 0) ||
-        shard.semantic?.momentType ||
-        shard.semantic?.flags?.needsFollowup ||
-        shard.semantic?.flags?.possibleCrisis) && (
-        <section className="space-y-2 text-sm">
-          <h2 className="font-semibold text-sm">Análisis semántico</h2>
+      <section className="space-y-2 text-sm">
+        <h2 className="font-semibold text-sm">Análisis semántico</h2>
+        {(() => {
+          const analysisSemantic = (shard as unknown as { analysis?: { semantic?: unknown } })
+            .analysis?.semantic;
+          const semantic =
+            (shard.semantic ?? null) ??
+            (analysisSemantic && typeof analysisSemantic === 'object'
+              ? (analysisSemantic as unknown as typeof shard.semantic)
+              : null);
 
-          {shard.semantic?.summary && (
-            <p className="text-sm text-slate-100 leading-relaxed">
-              {shard.semantic.summary}
-            </p>
-          )}
+          const hasAny =
+            !!semantic?.summary ||
+            (!!semantic?.topics && semantic.topics.length > 0) ||
+            !!semantic?.momentType ||
+            !!semantic?.flags?.needsFollowup ||
+            !!semantic?.flags?.possibleCrisis;
 
-          {shard.semantic?.topics?.length ? (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {shard.semantic.topics?.map((topic, i) => (
-                <span
-                  key={`${topic}-${i}`}
-                  className="inline-flex items-center rounded-full bg-slate-800/80 px-3 py-1 text-xs font-medium text-slate-100 border border-slate-700/60"
-                >
-                  {topic}
-                </span>
-              ))}
-            </div>
-          ) : null}
+          if (!hasAny) {
+            return <p className="text-xs text-slate-500">(análisis en progreso)</p>;
+          }
 
-          {shard.semantic?.momentType && (
-            <div className="mt-3">
-              {(() => {
-                const { label, className } = getMomentTypeStyles(
-                  shard.semantic?.momentType
-                );
-                return <span className={className}>{label}</span>;
-              })()}
-            </div>
-          )}
+          return (
+            <>
+              {semantic?.summary ? (
+                <p className="text-sm text-slate-100 leading-relaxed">{semantic.summary}</p>
+              ) : null}
 
-          {(shard.semantic?.flags?.needsFollowup ||
-            shard.semantic?.flags?.possibleCrisis) && (
-            <div className="mt-4 rounded-lg border border-amber-500/50 bg-amber-500/5 px-3 py-2 text-xs text-amber-100">
-              {shard.semantic?.flags?.possibleCrisis
-                ? '⚠️ Este momento podría indicar una crisis. Vale la pena revisarlo con calma.'
-                : 'ℹ️ Este momento sugiere que podría necesitarse un seguimiento en otra sesión.'}
-            </div>
-          )}
-        </section>
-      )}
+              {semantic?.topics?.length ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {semantic.topics?.map((topic, i) => (
+                    <span
+                      key={`${topic}-${i}`}
+                      className="inline-flex items-center rounded-full bg-slate-800/80 px-3 py-1 text-xs font-medium text-slate-100 border border-slate-700/60"
+                    >
+                      {topic}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+
+              {semantic?.momentType ? (
+                <div className="mt-3">
+                  {(() => {
+                    const { label, className } = getMomentTypeStyles(semantic?.momentType);
+                    return <span className={className}>{label}</span>;
+                  })()}
+                </div>
+              ) : null}
+
+              {(semantic?.flags?.needsFollowup || semantic?.flags?.possibleCrisis) ? (
+                <div className="mt-4 rounded-lg border border-amber-500/50 bg-amber-500/5 px-3 py-2 text-xs text-amber-100">
+                  {semantic?.flags?.possibleCrisis
+                    ? '⚠️ Este momento podría indicar una crisis. Vale la pena revisarlo con calma.'
+                    : 'ℹ️ Este momento sugiere que podría necesitarse un seguimiento en otra sesión.'}
+                </div>
+              ) : null}
+            </>
+          );
+        })()}
+      </section>
 
       <section className="space-y-2 text-sm">
         <h2 className="font-semibold text-sm">Rasgos de la señal</h2>
         <div className="text-xs text-slate-300">
-          RMS: {shard.features.rms.toFixed(4)}
+          RMS:{' '}
+          {typeof safeFeatures.rms === 'number' && Number.isFinite(safeFeatures.rms)
+            ? safeFeatures.rms.toFixed(4)
+            : '--'}
         </div>
         <div className="text-xs text-slate-300">
-          Pico: {shard.features.peak.toFixed(4)}
+          Pico:{' '}
+          {typeof safeFeatures.peak === 'number' && Number.isFinite(safeFeatures.peak)
+            ? safeFeatures.peak.toFixed(4)
+            : '--'}
         </div>
-        {shard.features.spectralCentroid != null && (
+        {typeof safeFeatures.spectralCentroid === 'number' &&
+          Number.isFinite(safeFeatures.spectralCentroid) && (
+            <div className="text-xs text-slate-300">
+              Frecuencia central: {safeFeatures.spectralCentroid.toFixed(2)}
+            </div>
+          )}
+        {typeof safeFeatures.zcr === 'number' && Number.isFinite(safeFeatures.zcr) && (
           <div className="text-xs text-slate-300">
-            Frecuencia central: {shard.features.spectralCentroid.toFixed(2)}
-          </div>
-        )}
-        {shard.features.zcr != null && (
-          <div className="text-xs text-slate-300">
-            ZCR: {shard.features.zcr.toFixed(4)}
+            ZCR: {safeFeatures.zcr.toFixed(4)}
           </div>
         )}
       </section>
 
-      {suggestedTags.length > 0 && (
+      {safeSuggestedTags.length > 0 && (
         <section className="space-y-2 text-sm">
           <h2 className="font-semibold text-sm">Etiquetas sugeridas</h2>
           <div className="mt-2 flex flex-wrap gap-2">
-            {suggestedTags.map((tag) => (
+            {safeSuggestedTags.map((tag) => (
               <span
                 key={tag}
                 className="inline-flex items-center rounded-full bg-slate-800/80 px-3 py-1 text-xs font-medium text-slate-100 border border-slate-700/60"

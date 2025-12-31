@@ -65,3 +65,32 @@ export interface InvitationsResponse {
 export interface CreateInvitationResponse {
   invitation: Invitation;
 }
+
+export interface FeedEmotion {
+  primary: string | null;
+  valence: 'positive' | 'neutral' | 'negative' | null;
+  activation: 'low' | 'medium' | 'high' | null;
+  headline: string | null;
+  intensity: number | null;
+}
+
+export type FeedItemEmotion = FeedEmotion;
+
+export interface FeedItem {
+  id: string;
+  shardId: string;
+  episodeId: string;
+  publishedAt: string;
+  startTimeSec: number | null;
+  endTimeSec: number | null;
+  status: string;
+  userTags: string[];
+  emotion: FeedEmotion;
+  transcriptSnippet: string | null;
+}
+
+export interface MyFeedResponse {
+  items: FeedItem[];
+}
+
+export type FeedResponse = MyFeedResponse;

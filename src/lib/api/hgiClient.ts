@@ -1,6 +1,7 @@
 import { getEvaDataMode, getEvaAnalysisMode, getLocalAnalysisBaseUrl, getCloudAnalysisBaseUrl } from '@/lib/config/evaAnalysisConfig';
 import type {
   CreateInvitationResponse,
+  MyFeedResponse,
   Invitation,
   InvitationsResponse,
   ProfileWithSummaries,
@@ -60,4 +61,12 @@ export async function createInvitation(email: string): Promise<Invitation> {
   });
 
   return res.invitation;
+}
+
+export async function fetchMyFeed(): Promise<MyFeedResponse> {
+  return fetchJson<MyFeedResponse>('/me/feed');
+}
+
+export async function fetchFeed(): Promise<MyFeedResponse> {
+  return fetchMyFeed();
 }

@@ -66,6 +66,7 @@ export interface EpisodeSummary {
   updatedAt: string;
   shardCount: number;
   durationSeconds: number;
+  curatedShardIds?: string[];
   dominantEmotion?: CoreEmotion | null;
   momentTypes?: string[];
   tags?: string[];
@@ -106,6 +107,7 @@ export interface EmoShard {
   // episodeId: relación clara del shard con un episodio.
   // Nota: opcional por compatibilidad con shards antiguos ya guardados.
   episodeId?: string;
+  meta?: Record<string, unknown> | null;
   source: 'mic' | 'file';
   startTime: number; // inicio del clip (segundos)
   endTime: number; // fin del clip (segundos)

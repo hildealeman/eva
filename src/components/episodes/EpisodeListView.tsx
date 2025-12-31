@@ -45,8 +45,10 @@ export default function EpisodeListView() {
     try {
       const all = await stores.EpisodeStore.getAllEpisodes();
 
+      const filtered = all.filter((ep) => (ep.shardCount ?? 0) > 0);
+
       const details = await Promise.all(
-        all.map(async (ep) => {
+        filtered.map(async (ep) => {
           try {
             const detail = await stores.EpisodeStore.getEpisodeById(ep.id);
             return { id: ep.id, detail };
@@ -59,7 +61,7 @@ export default function EpisodeListView() {
       const detailMap = new Map(details.map((d) => [d.id, d.detail]));
 
       setEpisodes(
-        all.map((summary) => ({
+        filtered.map((summary) => ({
           summary,
           reviewCounts: computeReviewCounts(detailMap.get(summary.id) ?? null),
         }))
@@ -117,9 +119,18 @@ export default function EpisodeListView() {
 
   if (episodes.length === 0) {
     return (
-      <p className="text-sm text-slate-500">
-        Todavía no hay episodios. Graba algo desde la pantalla principal para crear el primero.
-      </p>
+      <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-6 text-center space-y-2">
+        <div className="text-base font-semibold text-slate-100">No tienes clips todavía</div>
+        <div className="text-sm text-slate-400">
+          Vuelve a la pantalla principal, inicia una sesión de escucha y EVA creará tus primeros clips.
+        </div>
+        <Link
+          href="/"
+          className="inline-flex items-center justify-center h-9 px-4 rounded-full bg-emerald-700 hover:bg-emerald-600 text-xs font-semibold text-slate-50"
+        >
+          Ir a la pantalla principal
+        </Link>
+      </div>
     );
   }
 

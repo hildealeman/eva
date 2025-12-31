@@ -3,13 +3,14 @@
 import { useCallback, useState } from 'react';
 
 interface TagEditorProps {
-  tags: string[];
+  tags?: string[];
   onAdd: (tag: string) => void;
   onRemove: (tag: string) => void;
 }
 
-export default function TagEditor({ tags, onAdd, onRemove }: TagEditorProps) {
+export default function TagEditor({ tags = [], onAdd, onRemove }: TagEditorProps) {
   const [value, setValue] = useState('');
+  const safeTags = tags ?? [];
 
   const commit = useCallback(() => {
     const t = value.trim();
@@ -21,7 +22,7 @@ export default function TagEditor({ tags, onAdd, onRemove }: TagEditorProps) {
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-1 text-xs">
-        {tags.map((tag) => (
+        {safeTags.map((tag) => (
           <button
             key={tag}
             type="button"
