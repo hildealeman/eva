@@ -481,6 +481,34 @@ export default function ClipDetailPage() {
     // Always persist last edits locally first.
     await saveShardLocally();
 
+    // Ensure EVA2 has the latest review fields before publishing.
+    // EVA2 rejects publish if the shard is not in readyToPublish remotely.
+    try {
+      const client = getEpisodeClient();
+      const remoteUpdated = await client.updateShard(selectedShard.id, {
+        analysis: {
+          user: {
+            status: reviewStatus,
+            userTags: tags,
+            userNotes: notes,
+            transcriptOverride: reviewTranscriptOverride.trim()
+              ? reviewTranscriptOverride.trim()
+              : undefined,
+          },
+        },
+      });
+
+      if (!remoteUpdated) {
+        setPublishError(
+          'No pude sincronizar este shard con EVA 2 antes de publicar. Intenta de nuevo (o revisa que el backend esté disponible).'
+        );
+        return;
+      }
+    } catch {
+      setPublishError('No pude sincronizar este shard con EVA 2 antes de publicar.');
+      return;
+    }
+
     setPublishing(true);
     try {
       const client = getEpisodeClient();
